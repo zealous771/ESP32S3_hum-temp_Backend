@@ -86,13 +86,16 @@ cp .env.example .env
 app/
 ├── main.py            create_app() 工厂 + lifespan
 ├── config.py          pydantic-settings 配置
+├── clock.py           now_ms()，后端时钟的唯一来源
 ├── logging_conf.py    日志配置 + 限速日志器
 ├── stats.py           运行期计数器 + seq 跟踪
 ├── mqtt/              MQTT 接入（paho + 报文契约）
-├── db/                持久化（模型 + 仓储）
+├── db/                持久化（模型 + 仓储，所有 SQL 都在这）
 ├── services/          业务编排
+│   ├── telemetry_service.py  入库（可测入口：handle_batch）
+│   └── retention.py          保留策略（可测入口：run_once）
 ├── api/               HTTP 路由
-└── ai/                Phase 8/9 占位，本轮不实现
+└── ai/                Phase 8/9 占位（签名写全、实现抛异常）
 tools/                 开发期排障脚本
 tests/                 pytest
 ```
@@ -104,6 +107,41 @@ tests/                 pytest
 **绝对不要把库放在 `/mnt/c` 下面。** `/mnt/c` 是 DrvFs（9p），WAL 依赖的
 `-shm` 共享内存映射在它上面支持不完整，症状是"明明没有并发却报
 `database is locked`"，而且**开发早期不会出现**——等你把数据看得比较重了才炸。
+
+### 两条时间轴
+
+`telemetry` 表同时存两个时间，各司其职：
+
+| 列 | 含义 | 时钟 |
+|---|---|---|
+| `ts` | 设备**采样**时刻 | 设备时钟（NTP 同步后的 Unix 毫秒） |
+| `received_at` | 后端**收到**时刻 | 后端时钟 |
+
+查历史用 `ts`（顺序正确），排查链路用 `received_at`（永远可靠）。
+**只有 `received_at` 能发现"设备静默停发"**——实测踩过设备连续发 41 分钟后
+彻底停发 2.5 小时，而它本地一切正常；只看 `ts` 的话那段时间就是"没有行"，
+分不清"设备没采"和"采了没发出来"。
+
+`find_receive_gaps()` 就是直接回答这个问题的：找出所有超过阈值的入库间隔。
+它同时暴露在 `/api/health` 的 `data.recent_gaps` 里。
+
+### 数据保留
+
+`TELEMETRY_RETENTION_DAYS=0`（默认）= **不清理**；`N>0` = 删除 `received_at`
+早于"现在减 N 天"的行。
+
+三个细节：
+
+- **按 `received_at` 删，不按 `ts` 删**：`ts` 来自设备时钟，可能失真。
+- **只删 `clock='unix'` 的行**：`boot` 行的 `ts` 只有几千，按 `ts` 判"旧"会把
+  它们全删掉——而它们是排查"设备为什么没同步上时间"的唯一线索。
+- **分块删**（`RETENTION_CHUNK_SIZE`，默认 5000 行/批，每批一次提交）：
+  一次删几百万行会让 WAL 在提交前持续增长、写锁一直不释放，
+  遥测入库被挡住几分钟。分块把一次长锁拆成一串短锁。
+
+清理跑在独立线程里（`app/services/retention.py`），默认每小时检查一次。
+它在 `/api/health` 的 `retention` 段里可见——因为"保留策略没生效"的症状是
+**磁盘满**，那时离根因已经很远了。
 
 ## 版本
 

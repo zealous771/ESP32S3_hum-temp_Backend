@@ -58,15 +58,17 @@ MAX_GAPS_IN_HEALTH = 5
 def health(request: Request, db: DbSession) -> dict[str, Any]:
     """一次返回所有能用来判断"现在正常吗"的信息。
 
-    分成四段，对应四个不同的故障域：
+    分成五段，对应五个不同的故障域：
 
-        mqtt     连上 broker 了吗、收了多少、断了几次
-        ingest   收到的数据进了库吗、丢了多少、队列堵不堵
-        db       库文件多大、WAL 生效吗、有多少行
-        data     ★ 数据流还活着吗（最后一条多久之前、有没有断层）
+        mqtt      连上 broker 了吗、收了多少、断了几次
+        ingest    收到的数据进了库吗、丢了多少、队列堵不堵
+        db        库文件多大、WAL 生效吗、有多少行
+        retention 保留策略在跑吗、删了多少（防"库无限长大直到磁盘满"）
+        data      ★ 数据流还活着吗（最后一条多久之前、有没有断层）
 
     排查时按这个顺序看：mqtt.connected → ingest.persisted →
     db.telemetry_rows → data.age_ms。哪一段断了，问题就在哪一段。
+    retention 是旁路，只在怀疑磁盘空间时才需要看。
     """
     now = now_ms()
 
@@ -100,6 +102,26 @@ def health(request: Request, db: DbSession) -> dict[str, Any]:
         "devices": repo.count_devices(db),
     }
 
+    # ── 保留策略 ───────────────────────────────────────────────
+    #
+    # 单独一段，不塞进 db：db 回答"库现在多大"，这段回答"库会不会无限长大"。
+    # 后者出问题（保留策略没生效）的症状是**磁盘满**，
+    # 而那时已经离根因很远了，所以这里把配置和实际删除量都报出来。
+    retention = getattr(request.app.state, "retention", None)
+    if retention is not None:
+        retention_info: dict[str, Any] = dict(retention.stats.snapshot())
+        retention_info.update(
+            {
+                "enabled": retention.enabled,
+                "running": retention.running,
+                "retention_days": settings.telemetry_retention_days,
+                "interval_s": settings.retention_prune_interval_s,
+                "chunk_size": settings.retention_chunk_size,
+            }
+        )
+    else:
+        retention_info = {"enabled": False, "running": False}
+
     # ── ★ 数据流活性 ───────────────────────────────────────────
     last_received = repo.last_received_at(db)
     age_ms = (now - last_received) if last_received is not None else None
@@ -119,6 +141,7 @@ def health(request: Request, db: DbSession) -> dict[str, Any]:
         "mqtt": mqtt_info,
         "ingest": ingest_info,
         "db": db_info,
+        "retention": retention_info,
         "data": data_info,
         "settings": {
             "broker": settings.mqtt_broker_repr,

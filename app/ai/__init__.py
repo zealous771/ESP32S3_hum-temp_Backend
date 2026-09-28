@@ -7,7 +7,21 @@
     不要在没有历史数据时直接训练 LSTM。
     建议先积累：至少几天 / 最好几周 的真实传感器数据。
 
-所以本目录目前只有占位。等数据攒够了，按下面顺序实现
+所以本目录目前只有占位。**但占位是"签名写全、实现抛异常"，
+不是空文件**——这样接口形状先定下来，算法可以换（规则 → Z-Score →
+Isolation Forest），而调用方不用跟着改：
+
+    features.py   FEATURE_COLUMNS / ROLLING_WINDOW_POINTS / SPLIT_RATIOS
+                  build_features() / time_ordered_split()
+    anomaly.py    LEVELS / METHOD_* / AnomalyHit / detect()
+    forecast.py   HORIZONS_MINUTES / FORECAST_METRICS / ForecastPoint / forecast()
+
+★ 实现一律 `raise NotImplementedError`，不返回空列表。
+
+  这是刻意的：返回空列表会让"AI 还没实现"看起来像"AI 说没有异常"，
+  而这两件事在页面上长得一模一样。抛异常则任何误接线都会立刻暴露。
+
+等数据攒够了，按下面顺序实现
 （每一版都能独立验收，见 §27-§31）：
 
     第一版  §27  规则检测   温度<0/>50、湿度<5/>95       —— 文档自己说"这不算真正的 AI"

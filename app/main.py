@@ -37,8 +37,9 @@ from app.config import Settings, get_settings
 from app.db.database import Database
 from app.logging_conf import setup_logging
 from app.mqtt.consumer import MqttConsumer
+from app.services.retention import RetentionService
 from app.services.telemetry_service import TelemetryIngestor
-from app.stats import IngestStats
+from app.stats import IngestStats, RetentionStats
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     stats = IngestStats()
     ingestor = TelemetryIngestor(db, settings, stats=stats)
 
+    # ── 保留策略 ───────────────────────────────────────────────
+    # 独立线程，与数据流解耦。未配置保留天数时它什么都不做
+    # （start() 里直接返回，连线程都不建）——这是开发阶段的正常状态。
+    retention = RetentionService(db, settings, stats=RetentionStats())
+
     # ── MQTT（可关）────────────────────────────────────────────
     # mqtt_enabled=False 时完全不建消费者。这样单元测试不需要 broker
     # 就能起 app——否则每个测试都得先起一个 Mosquitto。
@@ -79,29 +85,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         ★ 顺序有讲究：
 
-          启动：先起写库线程，再连 MQTT。
+          启动：先起写库线程，再起保留策略线程，最后连 MQTT。
             反过来的话，MQTT 一连上就可能来消息、submit 进队列，
             而没人消费——虽然队列能缓冲，但没必要留这个窗口。
+            保留策略排在写库线程之后，是因为它一启动就会删一批数据，
+            而写库线程可能同时要写——两者都要抢写锁，
+            让写库先起来能避免启动瞬间的锁竞争。
 
-          关闭：先断 MQTT，再停写库线程。
+          关闭：先断 MQTT，再停保留策略，最后停写库线程。
             反过来的话，写库线程停了而 MQTT 还在收，
             新消息只会堆在队列里然后随进程一起丢。
+            保留策略要排在写库线程之前停：它持写锁，
+            留着它会让写库线程最后那批数据的落盘被拖住。
         """
         ingestor.start()
+        retention.start()
         if consumer is not None:
             consumer.start()
         logger.info(
-            "后端已启动：API=%s:%d broker=%s（mqtt=%s）",
+            "后端已启动：API=%s:%d broker=%s（mqtt=%s，保留策略=%s）",
             settings.api_host,
             settings.api_port,
             settings.mqtt_broker_repr,
             "启用" if consumer is not None else "禁用",
+            f"{settings.telemetry_retention_days} 天"
+            if retention.enabled
+            else "未启用",
         )
         try:
             yield
         finally:
             if consumer is not None:
                 consumer.stop()
+            retention.stop()
             ingestor.stop()
             db.dispose()
             logger.info("后端已停止")
@@ -121,6 +137,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = settings
     app.state.db = db
     app.state.ingestor = ingestor
+    app.state.retention = retention
     app.state.consumer = consumer
 
     # ── CORS ───────────────────────────────────────────────────

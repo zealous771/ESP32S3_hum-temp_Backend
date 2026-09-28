@@ -297,10 +297,23 @@ def count_telemetry(session: Session) -> int:
     )
 
 
-def prune_telemetry(session: Session, *, older_than_ms: int) -> int:
-    """删除旧的遥测，返回删除行数。
+def delete_old_telemetry_chunk(
+    session: Session, *, older_than_ms: int, limit: int
+) -> int:
+    """删掉一批过期遥测，**最多 limit 行**，返回实际删除数。
 
-    ★ 两个刻意的选择：
+    ★ 为什么是"删一批"而不是"删干净"，也就是说本层不提供
+      "把过期数据全删掉"这种函数：
+
+        调用方（services/retention.py）必须能在**每批之间提交**。
+        而 Session 的事务边界由调用方掌握——仓储层只负责发一条 SQL。
+        如果在这里写成循环删干净，事务会一直开着：
+        WAL 文件在提交前持续增长、写锁一直不释放，
+        遥测入库会被挡住几分钟。详见 config.retention_chunk_size 的说明。
+
+      所以本函数的契约是"调用方反复调它，直到返回值 < limit"。
+
+    ★ 两个刻意的选择（与只删一批无关，是"删什么"的取舍）：
 
       1. **按 received_at 删，不按 ts 删。**
          ts 来自设备时钟，可能因为设备没同步 NTP 而失真；
@@ -311,14 +324,25 @@ def prune_telemetry(session: Session, *, older_than_ms: int) -> int:
          boot 行的 ts 只有几千，如果按 ts 判"旧"会把它们全部误删；
          而它们恰恰是排查"设备为什么没同步上时间"的唯一线索。
          这类行数量极少（每次开机只有几秒），留着没有成本。
+
+    :param older_than_ms: 早于这个时刻（received_at < 该值）的算过期
+    :param limit: 本次最多删多少行
+    :return: 实际删除行数；返回 < limit 说明已经删完了
     """
     from sqlalchemy import delete
 
-    stmt = (
-        delete(Telemetry)
+    # 用子查询选出要删的 id 再按 id 删。
+    # 为什么不直接 DELETE ... WHERE received_at < ? LIMIT n：
+    #   SQLite 的 DELETE 只有在编译时开了 SQLITE_ENABLE_UPDATE_DELETE_LIMIT
+    #   才支持 LIMIT，不能假定它一定可用。子查询里的 LIMIT 则没有限制。
+    #
+    # 子查询走 ix_telemetry_received_at 索引做范围扫描，不会全表扫。
+    victims = (
+        select(Telemetry.id)
         .where(Telemetry.clock == "unix", Telemetry.received_at < older_than_ms)
+        .limit(limit)
     )
-    result = session.execute(stmt)
+    result = session.execute(delete(Telemetry).where(Telemetry.id.in_(victims)))
     return int(result.rowcount or 0)
 
 

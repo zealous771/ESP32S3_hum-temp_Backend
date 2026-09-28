@@ -1,7 +1,11 @@
 """运行期计数器与 MQTT 序号（seq）跟踪。
 
-这个模块只有两个东西，但都很关键——它们决定 /api/health 能不能
+这个模块有三个东西，都很关键——它们决定 /api/health 能不能
 回答"数据有没有在流"这个问题。
+
+    IngestStats      数据**进来**的过程：收了多少、入库多少、丢了多少
+    RetentionStats   数据**出去**的过程：删了多少、什么时候删的
+    SeqTracker       设备侧序号，用来发现"中间少了哪些数据"
 
 为什么把计数器集中在一个模块，而不是散在各个类里：
 
@@ -83,6 +87,42 @@ class IngestStats:
             "seq_gap_events": self.seq_gap_events,
             "seq_missing_messages": self.seq_missing_messages,
             "devices_seen": sorted(self.devices_seen),
+        }
+
+
+@dataclass
+class RetentionStats:
+    """保留策略（定期删除过期遥测）的计数器。
+
+    ★ 为什么单独一个类，而不是塞进 IngestStats：
+
+        IngestStats 回答的是"数据进来的过程顺不顺"，
+        这个回答的是"数据出去的过程顺不顺"。两者的失败模式、
+        排查动作完全不同——前者出问题要去查 broker 和设备，
+        后者出问题只跟配置和磁盘有关。混在一起会让 /api/health
+        的那个 dict 变成一锅粥，而且以后只会更长。
+
+    只有**已删除**是权威数字。"还剩多少该删的"故意不报：
+    那需要在每次健康检查时做一次 COUNT 范围扫描，数据量大时会
+    拖慢健康检查，而它对判断"保留策略有没有在工作"没有额外价值——
+    看 deleted_total 有没有在涨就够了。
+    """
+
+    runs: int = 0                  # 实际执行过的清理次数（不含被跳过的）
+    deleted_total: int = 0         # 累计删除行数
+    last_deleted: int = 0          # 最近一次删了多少
+    last_cutoff_ms: int | None = None   # 最近一次的截止时刻（received_at < 它的被删）
+    last_run_ms: int | None = None      # 最近一次的结束时刻（后端时钟）
+    last_duration_ms: int = 0      # 最近一次耗时。持续变长说明库在变大
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "runs": self.runs,
+            "deleted_total": self.deleted_total,
+            "last_deleted": self.last_deleted,
+            "last_cutoff_ms": self.last_cutoff_ms,
+            "last_run_ms": self.last_run_ms,
+            "last_duration_ms": self.last_duration_ms,
         }
 
 
