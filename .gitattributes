@@ -1,0 +1,43 @@
+# 换行符统一为 LF
+#
+# 为什么需要这个文件：
+#
+#   本项目在 WSL（Linux）里运行，但 git 是 **Windows 版**的，
+#   而 Windows 版 git 的默认 core.autocrlf=true 会在**检出时**把 LF 转成 CRLF。
+#   三个后果，按严重程度排：
+#
+#   1. **shell 脚本直接失效**。CRLF 的 .sh 执行时报
+#      `bad interpreter: /bin/bash^M`——这个报错看起来像路径问题，
+#      实际上是行尾多了一个 \r。而脚本在仓库里看着完全正常。
+#
+#   2. **WSL 里的工具被 \r 污染**。grep/sed/awk 会把行尾的 \r 当成内容，
+#      于是 `grep "^KEY="` 匹配不上，或者拼出来的路径末尾多个不可见字符。
+#
+#   3. 每次 git status 都刷一屏 "LF will be replaced by CRLF" 警告，
+#      真正的提示被淹没。
+#
+#   `* text=auto eol=lf` 的含义：
+#     text=auto —— 让 git 自动判断哪些是文本文件（按内容而非扩展名）
+#     eol=lf    —— 文本文件在仓库里和检出后都用 LF，不做转换
+#
+# 二进制文件必须显式声明，否则 git 可能对它们做行尾转换而损坏内容
+# （典型症状是图片打不开、SQLite 库报 "malformed"）。
+
+* text=auto eol=lf
+
+# ── 二进制，绝不转换 ────────────────────────────────────────────
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.pdf   binary
+*.whl   binary
+*.tar.gz binary
+
+# SQLite 数据库（正常不会入库，但本地实验时可能临时放进 data/）
+*.db     binary
+*.db-wal binary
+*.db-shm binary
+*.sqlite binary
+*.sqlite3 binary

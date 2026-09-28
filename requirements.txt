@@ -1,0 +1,35 @@
+# 运行时依赖
+#
+# 为什么全部钉死到确切版本（== 而不是 >= 或 ^）：
+#   这是个要长期跑、且后面还要叠加 AI 阶段的工程。不钉版本的话，
+#   半年后 pip install 会拉到一个不兼容的新版本，而症状是运行期才暴露
+#   （比如 paho-mqtt 2.x 改了回调签名，直接 TypeError）。
+#   钉死之后升级是**显式动作**，不是"某天突然坏了"。
+#
+# 版本已核实存在于清华镜像（2026-09-28）。
+
+# Web 框架。选它而不是 Flask/Django 的原因：文档 §3 指定；
+# 且它自带 OpenAPI 文档（/docs），七个只读路由写起来最省事。
+fastapi==0.141.1
+
+# ASGI 服务器。[standard] 会带上 uvloop / httptools / websockets——
+# 前两个明显提升吞吐，websockets 是将来 Phase 7 做实时推送的伏笔。
+uvicorn[standard]==0.54.0
+
+# 数据校验与序列化。FastAPI 的基石；MQTT 报文的入站校验也用它。
+pydantic==2.13.5
+
+# 配置管理：从环境变量 / .env 读配置并做类型校验。
+# 选它而不是手写 os.environ.get() 的理由：手写的话，配置项拼错、
+# 类型不对、必填项缺失都要等到用的时候才炸；它启动时就校验完。
+pydantic-settings==2.15.0
+
+# MQTT 客户端。文档 §3 指定的 "Paho MQTT 等"。
+# ★ 2.x 与 1.x **不兼容**：Client() 必须传 callback_api_version，
+#   on_connect/on_disconnect 的回调参数个数也变了。详见 app/mqtt/consumer.py。
+paho-mqtt==2.1.0
+
+# ORM。文档 §19 的 db/models.py + db/repository.py 就是"声明式模型 + 仓储"
+# 这个模式。用它而不是裸 sqlite3 的理由：将来切 PostgreSQL 时，
+# 90% 的查询代码不用改；而且它帮我们把参数绑定（防注入）做掉了。
+SQLAlchemy==2.0.54

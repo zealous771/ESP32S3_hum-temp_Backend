@@ -1,0 +1,38 @@
+# 构建镜像时**不要**拷进去的东西
+#
+# 为什么需要它（而不是靠 .gitignore）：
+#   Docker 的构建上下文和 git 是两回事。docker build 会把整个目录
+#   打包发给 daemon——如果不排除 .venv，每次构建都要传输几千个文件、
+#   几十 MB，构建慢得离谱，而且缓存层会频繁失效。
+
+# 虚拟环境（容器里会重新装）
+.venv/
+venv/
+env/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# 版本控制
+.git/
+.gitignore
+
+# 数据库（容器里用数据卷，不打包本机数据）
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# 凭据（运行时通过环境变量注入）
+.env
+
+# 日志
+*.log
+
+# 说明文档
+README.md

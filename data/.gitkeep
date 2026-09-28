@@ -1,0 +1,14 @@
+这个目录是**本地开发时 SQLite 数据库的默认落点**（见 .env.example）。
+
+为什么要留一个 .gitkeep：
+
+    git 不跟踪空目录，没有这个文件的话克隆下来 data/ 就不存在，
+    而代码要往这里写库文件——报错是 "unable to open database file"，
+    看起来像权限问题，其实是目录不存在。
+
+为什么要在这里而不是在 /mnt/c 下建库：
+
+    /mnt/c 是 DrvFs（9p），WAL 依赖的 -shm 共享内存映射在它上面
+    支持不完整，症状是"明明没有并发却报 database is locked"。
+    所以本地开发的库放在 WSL 自己的文件系统里（默认 /home/ubuntu/iot-data/），
+    这个目录只在你想把库放在项目内时用。

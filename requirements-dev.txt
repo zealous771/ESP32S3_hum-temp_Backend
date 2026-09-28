@@ -1,0 +1,15 @@
+-r requirements.txt
+
+# 测试框架。用 pytest 而不是 unittest 的理由：fixture 机制更适合
+# "每个测试一个独立的临时数据库"这种需求（见 tests/conftest.py）。
+pytest==9.1.1
+
+# FastAPI 的 TestClient 底层依赖 httpx。它是**运行期测试**的依赖，
+# 不是可选的——不装的话 from fastapi.testclient import TestClient 直接 ImportError。
+httpx==0.28.1
+
+# 覆盖率。本轮目标 ≥ 75%（见计划 §0）。
+# 为什么定这个数而不是 90%：剩下那 10~15% 主要是 paho 回调、写线程
+# 循环、Docker 相关代码，测它们需要 mock 一大堆运行时细节，
+# 收益远低于成本。宁可把这部分留给集成验收。
+pytest-cov==7.1.0
