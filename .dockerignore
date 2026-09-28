@@ -34,5 +34,19 @@ data/
 # 日志
 *.log
 
+# 测试
+#
+# ★ 排除 tests/ 有两个理由，第二个更重要：
+#
+#   1. 镜像里装的是 requirements.txt（运行时依赖），不含 pytest。
+#      把测试拷进去等于放一堆跑不起来的文件。
+#
+#   2. **避免误以为可以在容器里跑测试**。测试需要 pytest / httpx，
+#      而它们在 requirements-dev.txt 里。真有人在容器里执行
+#      `pytest` 时，会因为 ModuleNotFoundError 而困惑"为什么装了
+#      依赖还跑不了"——不如让它从一开始就找不到 tests/。
+#      测试就该在开发机上用 .venv 跑。
+tests/
+
 # 说明文档
 README.md

@@ -80,6 +80,50 @@ cp .env.example .env
 
 接口文档（FastAPI 自带）：<http://localhost:8005/docs>
 
+## 用 Docker 跑（常驻）
+
+```bash
+# ★ 必须在 WSL 里执行，不是 Windows
+cd /mnt/c/Users/mgnwo/Desktop/wrok_place/ESP32_project/ESP32_learn/backend
+
+# 前置：broker 所在的共享网络（只需一次）
+sudo docker network create iot-net
+
+sudo docker compose build
+sudo docker compose up -d
+sudo docker compose ps        # 预期 iot-backend  Up (healthy)
+sudo docker compose logs -f
+```
+
+从 Windows 访问：<http://localhost:8005/docs>（WSL2 的 localhost 转发，已实测）。
+
+### 为什么需要容器：本地直跑会漏数据
+
+后端不是常驻服务时，**只有它被手动启动的那段时间**才在收数据。
+实测踩过：库里只有 11 行，而设备已经发了几千条——中间那段是**永久丢失**的
+（broker 不持久化消息）。
+
+`restart: unless-stopped` 让它在 WSL / dockerd 重启后自己回来，于是
+"后端没在跑"这个失败模式被消除。**这是做 Step 7 的真正理由**，
+不是为了"看起来更工程化"。
+
+### 三个设计点
+
+**① 时区**：容器默认 UTC，`docker logs` 的时间戳会比本地**早 8 小时**。
+不影响数据（库里存的是 Unix 毫秒），但排查时你要拿容器日志和串口日志、
+broker 日志对齐时间，8 小时的偏差会让"哪个先发生"完全判断反。
+所以 compose 里设了 `TZ: Asia/Shanghai`。
+
+**② `CMD` 用 `sh -c "exec uvicorn ..."` 而不是 JSON 形式**：
+`exec` 让 uvicorn 成为 PID 1，直接收到 SIGTERM。不加的话 PID 1 是 `/bin/sh`，
+它默认不转发信号，`docker compose stop` 会等满超时然后 SIGKILL——
+而 SIGKILL 意味着 lifespan 的关闭逻辑不执行，**写库队列里剩的数据直接丢**。
+实测确认：日志里有 `写库线程已停止，队列剩余 0 条` 和
+`Finished server process [1]`（PID 1 = uvicorn，证明 exec 生效）。
+
+**③ 数据用 bind mount 挂在宿主机**，所以容器和"本机直跑 uvicorn"看到的是
+**同一个库文件**。代价与禁忌见下面"数据库"一节。
+
 ## 目录结构
 
 ```
@@ -96,8 +140,12 @@ app/
 │   └── retention.py          保留策略（可测入口：run_once）
 ├── api/               HTTP 路由
 └── ai/                Phase 8/9 占位（签名写全、实现抛异常）
-tools/                 开发期排障脚本
+tools/
+├── mqtt_print.py      只连 broker 打印报文（Step 1 的入口，也是排障工具）
+└── healthcheck.py     容器 HEALTHCHECK 的探针
 tests/                 pytest
+Dockerfile / docker-compose.yml
+data/.gitkeep          占位（库文件不入库）
 ```
 
 ## 数据库

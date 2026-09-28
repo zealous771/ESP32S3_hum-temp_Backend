@@ -1,0 +1,146 @@
+# IoT 后端（FastAPI + SQLite）
+#
+# 用法（**在 WSL 里执行**，不是 Windows）：
+#
+#   cd /mnt/c/Users/mgnwo/Desktop/wrok_place/ESP32_project/ESP32_learn/backend
+#   docker compose build          # 构建镜像
+#   docker compose up -d          # 启动
+#   docker compose ps             # 看状态（应为 (healthy)）
+#   docker compose logs -f        # 看日志
+#   docker compose down           # 停止
+#
+# 前提：broker 所在的共享网络 iot-net 必须已存在
+#   docker network create iot-net
+#
+# ── 为什么不写 depends_on: mosquitto ────────────────────────────
+#
+#   mosquitto 由**另一个 compose 项目**（../deploy/）管理。
+#   Compose 的 depends_on 只在同一个项目内有效——跨项目写不出来，
+#   硬写会因为找不到服务名而直接报错。
+#
+#   而且从设计上说也不该依赖它：**后端必须容忍 broker 不在**。
+#   broker 重启、WSL 重启、网络抖动都会让连接断开，paho 自带指数
+#   退避重连，连上就继续收。所以"谁先起"这件事根本不需要编排。
+#   真要编排反而有害——那会让后端因为 broker 没起而不启动，
+#   于是连 /api/health 都看不到，排查时少了一个观测点。
+#
+# ── 为什么不写 version: ─────────────────────────────────────────
+#
+#   Compose V2 已经不需要它，写了反而打一条 deprecation 警告。
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: iot-backend:dev
+
+    # 固定容器名，让 docker logs / docker exec 用起来可预测
+    # （否则名字是 backend-1 这种由项目名拼出来的）。
+    container_name: iot-backend
+
+    # ★ 和 mosquitto 一样用 unless-stopped：
+    #   WSL 重启、Docker 服务重启后自动起来。
+    #   注意它救不了"WSL 发行版被整体停止"——那时 dockerd 自己都没了。
+    #   发行版停止的问题靠 Windows 启动文件夹里的 WSL-KeepAlive.bat，
+    #   见 ../deploy/README.md。
+    restart: unless-stopped
+
+    environment:
+      # ★ 容器默认是 UTC。不设这一项的话，`docker logs` 的时间戳会比
+      #   WSL / Windows 的本地时间**早 8 小时**。
+      #
+      #   这不影响任何数据（库里存的是 Unix 毫秒，与时区无关），
+      #   只影响**日志可读性**——而这一项在排查时的代价很大：
+      #   你会拿容器日志去和串口日志、broker 日志对齐时间，
+      #   8 小时的偏差会让"哪个先发生"完全判断反。
+      #
+      #   python:3.12-slim-bookworm 自带 tzdata（已实测
+      #   /usr/share/zoneinfo/Asia/Shanghai 存在），所以不需要额外装包。
+      TZ: Asia/Shanghai
+
+      # ★ 容器里的 broker 地址是**服务名**，不是 localhost。
+      #   "容器里的 localhost 是容器自己"是最常见的配置错误，
+      #   症状是连接被拒绝，而 broker 明明在跑。
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      # 和固件侧的 client_id 区分开。撞车的后果是双方轮流掉线。
+      MQTT_CLIENT_ID: iot-backend
+      MQTT_QOS: "1"
+
+      # ★ 四个斜杠：sqlite:/// 前缀 + 以 / 开头的绝对路径。
+      #   /data 是下面 volumes 里挂进来的目录。
+      DATABASE_URL: sqlite:////data/iot.db
+
+      API_HOST: 0.0.0.0
+      API_PORT: "8005"
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+
+      # 保留天数。0 = 不清理。默认从宿主机环境变量取，没设就是 0。
+      # 为什么默认不清理：开发期数据少，先攒着。等数据量上来了再开，
+      # 那时库里的历史也值得留一段时间。
+      TELEMETRY_RETENTION_DAYS: ${TELEMETRY_RETENTION_DAYS:-0}
+      PERSIST_BOOT_ROWS: "true"
+
+    ports:
+      # "宿主端口:容器端口"。
+      #
+      # 左侧绑定在 WSL 网络命名空间的所有网卡上。Windows 侧通过 WSL2
+      # 的 localhost 转发就能用 http://localhost:8005 访问（已验证）。
+      # 局域网访问需要 Windows 侧再加 portproxy + 防火墙规则，
+      # 和 8000-8003 那四个 Flask 网站一样——默认**不开**，
+      # 因为这是个没有任何鉴权的接口。
+      - "8005:8005"
+
+    volumes:
+      # ★ bind mount 而不是具名卷，有两个具体理由：
+      #
+      #   1. **能和本机直跑共用同一个库文件**。开发时 `uvicorn app.main:app`
+      #      直跑写的是 /home/ubuntu/iot-data/iot.db，容器挂同一个目录，
+      #      于是两条运行路径看到的是同一份数据——不用迁移，也不会出现
+      #      "怎么容器里没数据"这种混淆。
+      #
+      #   2. 排查时可以直接在 WSL 里用 python3 + sqlite3 读它，
+      #      不用 `docker exec` 进容器。
+      #
+      #   ⚠️ 但**绝不能挂 /mnt/c**。那是 DrvFs（9p 文件系统），
+      #   SQLite 的 WAL 依赖 -shm 共享内存映射，9p 支持不完整，
+      #   症状是"明明没有并发却报 database is locked"，而且开发早期
+      #   不出现。这里挂的是 WSL 原生 ext4 路径，没有这个问题。
+      #   （app/db/database.py 会在启动时校验 journal_mode，
+      #     不是 wal 就直接抛异常，所以配错了会立刻暴露。）
+      #
+      #   ⚠️ 容器和本机直跑**不要同时开**。两个进程各写一个库文件时
+      #   WAL 能保证不损坏，但 last_seen / 在线判定会互相干扰，
+      #   而且 MQTT client_id 也会撞。
+      #
+      # 宿主路径可用 IOT_DATA_DIR 覆盖（默认 /home/ubuntu/iot-data）。
+      - ${IOT_DATA_DIR:-/home/ubuntu/iot-data}:/data
+
+    networks:
+      # 和 mosquitto 共用这张网络，靠服务名互相解析。
+      - iot-net
+
+    logging:
+      # 和 mosquitto 一样限制日志大小。不限的话 json-file 驱动会
+      # 无限增长，跑几天就能吃掉几十 GB 磁盘。
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # ★ external: true 表示"这张网络不由本项目创建"。
+  #
+  #   为什么要显式写 name：不带 name 时，external 网络的名字直接取
+  #   key（也就是 iot-net），行为正确；但显式写出来能让"这个名字是
+  #   跨两个仓库的约定"这件事在文件里可见——它是本项目与 ../deploy/
+  #   之间唯一的耦合点。
+  #
+  #   代价：这个约定是隐式的，两个仓库之间没有自动检查。
+  #   如果哪天改了名字而只改了一边，症状是"后端连不上 broker"，
+  #   而 `docker network inspect` 才能看出两个容器在不同网络上。
+  #   已写进 README 的排障清单。
+  iot-net:
+    external: true
+    name: iot-net
