@@ -119,6 +119,15 @@ class TelemetryIngestor:
     def queue_depth(self) -> int:
         return self._queue.qsize()
 
+    def seq_snapshot(self) -> dict[str, object]:
+        """seq 跟踪的明细，给 /api/health 用。
+
+        里面是每台设备的 last_seq、累计缺口、重启次数。
+        /api/health 里的 ``ingest.seq_gap_events`` 是**汇总数**，
+        这里给的是**按设备分的明细**——多设备场景下要知道是哪台在丢。
+        """
+        return self._seq_tracker.snapshot()
+
     # ── MQTT 回调调用（必须极快返回）────────────────────────────
 
     def submit(self, item: InboundMessage) -> None:
