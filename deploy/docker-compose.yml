@@ -1,0 +1,90 @@
+# MQTT broker（开发阶段）
+#
+# 用法（在 WSL2 里执行，路径是 WSL 视角的 /mnt/c/...）：
+#
+#   cd /mnt/c/Users/mgnwo/Desktop/wrok_place/ESP32_project/ESP32_learn/backend/deploy
+#   sudo docker compose up -d          # 启动
+#   sudo docker compose logs -f        # 看日志
+#   sudo docker compose down           # 停止
+#
+# 订阅所有设备的所有 topic（验证设备有没有发出来）：
+#
+#   sudo docker exec mosquitto mosquitto_sub -v -t 'iot/#'
+#
+# 只看在线状态（文档 §17）：
+#
+#   sudo docker exec mosquitto mosquitto_sub -v -t 'iot/+/status'
+#
+# ── 关于 restart: unless-stopped ───────────────────────────────
+#
+# 让容器在 Docker 守护进程重启后自动起来（比如 WSL 重启、
+# Docker 服务重启）。注意它**救不了 WSL 发行版被整体停止**的情况——
+# 那时 dockerd 自己都没了，没有任何东西能重启容器。
+# 发行版停止的问题要靠保活脚本解决，见同目录 README.md。
+#
+# 不加版本号字段：Compose V2 已经不需要 `version:`，
+# 写了反而会打一条 deprecation 警告。
+#
+# ── 关于 iot-net 这张网络 ──────────────────────────────────────
+#
+# 本文件在 backend/deploy/ 下，和 backend/docker-compose.yml 属于
+# **同一个 git 仓库**（2026-09-29 从工作区根移进来的，见 README 第 8 节）。
+# 两者之间的耦合就是这张网络的名字：
+#
+#   1. 先建网络（只需一次，名字必须完全一致）：
+#        docker network create iot-net
+#   2. 本文件把 mosquitto 接上去
+#   3. ../docker-compose.yml 把后端也接上去
+#
+# 接上之后，后端用**服务名/容器名 mosquitto** 就能解析到 broker，
+# 不再走宿主机端口。这比"容器 → 宿主机 localhost → 端口映射 →
+# 再回到容器"少绕两跳，也少了"宿主端口被占用"这类失败模式。
+#
+# 代价：这张网络的名字是隐式约定，改了只改一边的症状是
+# "后端连不上 broker"，要用 docker network inspect 才能看出
+# 两个容器挂在不同网络上。已写进 README 的排障清单。
+
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+
+    restart: unless-stopped
+
+    ports:
+      # "宿主机端口:容器端口"。
+      #
+      # 左侧的 1883 绑定在**容器所在网络命名空间**的所有网卡上，
+      # 也就是 WSL 的 eth0。ESP32 要连的是 Windows 物理网卡的地址
+      # （192.168.31.128），那需要 Windows 侧再做一个 portproxy 转发，
+      # 见 README.md 第 3 节。
+      #
+      # ★ 这个端口映射在接了 iot-net 之后**仍然需要**：
+      #   后端走容器网络直连，但 ESP32 是从局域网进来的，
+      #   它必须经过这个映射 + portproxy。两者互不替代。
+      - "1883:1883"
+
+    volumes:
+      # 只读挂载配置。左侧路径相对 compose 文件所在目录，
+      # 所以无论从 WSL 还是 Windows 执行都能找对文件。
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+    networks:
+      - iot-net
+
+    logging:
+      # mosquitto.conf 里开了 log_type all，日志量不小。
+      # 不限大小的话容器日志会无限增长，跑几天就能吃掉几十 GB 磁盘。
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # external: true = 这张网络不由本项目创建，只是接入。
+  # 所以必须先 `docker network create iot-net`，否则 up 会报
+  # "network iot-net declared as external, but could not be found"。
+  iot-net:
+    external: true
+    name: iot-net
+

@@ -14,7 +14,7 @@
 #
 # ── 为什么不写 depends_on: mosquitto ────────────────────────────
 #
-#   mosquitto 由**另一个 compose 项目**（../deploy/）管理。
+#   mosquitto 由**另一个 compose 文件**（deploy/docker-compose.yml）管理。
 #   Compose 的 depends_on 只在同一个项目内有效——跨项目写不出来，
 #   硬写会因为找不到服务名而直接报错。
 #
@@ -43,7 +43,7 @@ services:
     #   WSL 重启、Docker 服务重启后自动起来。
     #   注意它救不了"WSL 发行版被整体停止"——那时 dockerd 自己都没了。
     #   发行版停止的问题靠 Windows 启动文件夹里的 WSL-KeepAlive.bat，
-    #   见 ../deploy/README.md。
+    #   见 deploy/README.md。
     restart: unless-stopped
 
     environment:
@@ -134,13 +134,16 @@ networks:
   #
   #   为什么要显式写 name：不带 name 时，external 网络的名字直接取
   #   key（也就是 iot-net），行为正确；但显式写出来能让"这个名字是
-  #   跨两个仓库的约定"这件事在文件里可见——它是本项目与 ../deploy/
-  #   之间唯一的耦合点。
+  #   两个 compose 文件之间的约定"这件事在文件里可见——它是本项目与
+  #   deploy/docker-compose.yml 之间唯一的耦合点。
   #
-  #   代价：这个约定是隐式的，两个仓库之间没有自动检查。
+  #   代价：这个约定是隐式的，两个 compose 文件之间没有自动检查。
   #   如果哪天改了名字而只改了一边，症状是"后端连不上 broker"，
   #   而 `docker network inspect` 才能看出两个容器在不同网络上。
   #   已写进 README 的排障清单。
+  #
+  #   注：deploy/ 原先在工作区根、不在任何仓库里，2026-09-29 移进了
+  #   backend/。所以现在这个约定**在同一个仓库内**，能一起提交、一起回溯。
   iot-net:
     external: true
     name: iot-net

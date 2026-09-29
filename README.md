@@ -143,10 +143,20 @@ app/
 tools/
 ├── mqtt_print.py      只连 broker 打印报文（Step 1 的入口，也是排障工具）
 └── healthcheck.py     容器 HEALTHCHECK 的探针
+deploy/                MQTT broker 的 compose + 配置 + 部署说明
+├── docker-compose.yml   mosquitto（接入共享网络 iot-net）
+├── mosquitto/mosquitto.conf
+├── setup-lan-access.ps1 局域网访问（portproxy + 防火墙，需管理员权限）
+└── README.md            部署排障手册 ← 部署出问题先看这个
 tests/                 pytest
 Dockerfile / docker-compose.yml
 data/.gitkeep          占位（库文件不入库）
 ```
+
+**为什么 `deploy/` 在这个仓库里**：它原先在工作区根、不在任何 git 仓库中。
+但 `iot-net` 这张网络是 `backend/` 与 `deploy/` 之间的约定——
+把耦合的两侧放进同一个仓库，才能一起提交、一起回溯。
+完整理由见 `deploy/README.md` 第 8 节。
 
 ## 数据库
 

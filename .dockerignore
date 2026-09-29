@@ -50,3 +50,11 @@ tests/
 
 # 说明文档
 README.md
+
+# 部署脚手架（mosquitto 的 compose 与配置）
+#
+# ★ 它现在就在本仓库里（backend/deploy/），所以必须显式排除。
+#   Dockerfile 用的是白名单 COPY（只拷 app/ 和 tools/），镜像里本来
+#   也不会有它；这里排除是为了**缩小构建上下文**——上下文会被打包
+#   发给 daemon，无关文件越多，构建越慢。
+deploy/
