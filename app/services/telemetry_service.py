@@ -119,6 +119,19 @@ class TelemetryIngestor:
     def queue_depth(self) -> int:
         return self._queue.qsize()
 
+    @property
+    def running(self) -> bool:
+        """写库线程是否还活着。
+
+        为什么要暴露它：这个线程**退出后没有任何外部症状**——
+        MQTT 连接正常、/api/health 的 connected 是 true、队列只进不出，
+        但数据不再落库。有了这个属性，健康检查或测试就能直接问
+        "它还在吗"，而不是靠"行数没涨"去反推。
+
+        （与 RetentionService.running 同形，两个后台线程的观测方式一致。）
+        """
+        return self._thread is not None and self._thread.is_alive()
+
     def seq_snapshot(self) -> dict[str, object]:
         """seq 跟踪的明细，给 /api/health 用。
 

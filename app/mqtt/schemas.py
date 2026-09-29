@@ -86,11 +86,32 @@ def parse_topic(topic: str) -> ParsedTopic | None:
     返回 None 是**正常情况**而不是错误——将来会加 ``iot/<id>/cmd``
     之类的下行 topic，那时后端会订阅到自己不认识的 topic。
     调用方应该计个数然后忽略，不要报错。
+
+    ★ device_id 的字符集在这里也要校验，不能只靠 payload 里那个。
+
+      为什么：telemetry 报文里 topic 和 payload 两边都有 device_id，
+      不一致会被 ``_handle_telemetry`` 拒掉；但 **status 报文里没有
+      device_id 字段**（见 ``StatusMessage``），只能从 topic 取——
+      于是 topic 里的非法 id 会一路写进 ``devices`` 表，
+      再出现在 ``/api/devices/{id}`` 的 URL 路径、日志和将来的前端路由里。
+
+      ``_DEVICE_ID_RE`` 的注释说得很清楚：限制字符集就是为了让
+      device_id 能安全地出现在这些地方。只在 payload 侧校验等于
+      漏了一半。
+
+      这个缺口是写测试时发现的：``iot/esp32;drop/telemetry`` 能通过
+      topic 正则（``[^/]+`` 只排除斜杠），靠 payload 不一致才被拦下——
+      而 status 那条路径上根本没有 payload 校验。
     """
     match = _TOPIC_RE.match(topic)
     if match is None:
         return None
-    return ParsedTopic(device_id=match.group("device_id"), kind=match.group("kind"))
+
+    device_id = match.group("device_id")
+    if not _DEVICE_ID_RE.match(device_id):
+        return None
+
+    return ParsedTopic(device_id=device_id, kind=match.group("kind"))
 
 
 class TelemetryMessage(BaseModel):

@@ -86,8 +86,15 @@ def health(request: Request, db: DbSession) -> dict[str, Any]:
         ingest_info: dict[str, Any] = dict(ingestor.stats.snapshot())
         ingest_info["queue_depth"] = ingestor.queue_depth
         ingest_info["seq_detail"] = ingestor.seq_snapshot()
+        # ★ 写库线程还活着吗。
+        #
+        #   它退出后**没有任何其他症状**：MQTT 连接正常、connected 是 true、
+        #   队列只进不出，但数据不再落库。只看持久化计数的话，
+        #   表现是"数字不涨了"——和"设备没在发"完全一样，分不清。
+        #   所以直接把线程存活状态报出来。
+        ingest_info["running"] = ingestor.running
     else:
-        ingest_info = {"enabled": False}
+        ingest_info = {"enabled": False, "running": False}
 
     # ── 数据库 ─────────────────────────────────────────────────
     settings = request.app.state.settings

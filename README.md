@@ -201,6 +201,63 @@ data/.gitkeep          占位（库文件不入库）
 它在 `/api/health` 的 `retention` 段里可见——因为"保留策略没生效"的症状是
 **磁盘满**，那时离根因已经很远了。
 
+## 测试
+
+```bash
+.venv/bin/python -m pytest            # 全量（覆盖率默认打开）
+.venv/bin/python -m pytest tests/test_consumer.py -q
+.venv/bin/python -m pytest -k "clock" # 按名字筛
+```
+
+**当前：136 个用例，覆盖率 97.5%**（门槛 75%，写在 `.coveragerc` 的 `fail_under`）。
+
+### 核心原则：把"传输"和"业务"切开
+
+```
+paho 回调 ──▶ queue ──▶ 写线程 ──▶ TelemetryIngestor.handle_batch()
+                                        ▲
+                                        └── 测试直接调这一层
+```
+
+`handle_batch()` 只接收"一批消息 + 一个 Session"，不认识 paho、不认识网络。
+所以**不依赖 broker、不依赖设备**就能覆盖"报文 → 数据库"的全部逻辑。
+
+这不是理论上的好处——是实测撞出来的：调端到端时设备正好静默停发，
+如果没有这层隔离，根本分不清是后端的问题还是设备的问题。
+
+### 测试文件的分工
+
+| 文件 | 覆盖什么 |
+|---|---|
+| `test_ingestor.py` | 报文 → 数据库（去重、boot 行、在线判定、seq 跳号） |
+| `test_api.py` | 七个路由 + 边界（404/422） |
+| `test_consumer.py` | MQTT 回调（**重连重订阅**、**异常吞掉**、报文校验） |
+| `test_retention.py` | 保留策略（**boot 行永不删**、分块、幂等） |
+| `test_repository.py` | 查询过滤条件（每个条件真的生效） |
+| `test_failure_guards.py` | **静默故障**：写库线程扛异常、schema 版本、队列不阻塞 |
+| `test_ai_placeholders.py` | AI 占位层的契约（调用即抛异常） |
+
+### 三个必须避开的坑
+
+**① 测试用临时文件库，不用 `:memory:`**
+
+SQLAlchemy 对 `sqlite:///:memory:` 用 `SingletonThreadPool`，也就是
+**每个线程一个独立的空内存库**。而写库线程和测试线程是两个线程——
+于是"写入"和"查询"看到的是两个不同的库，表现为**"写了却查不到"
+且不报任何错**。
+
+**② 不要 mock 掉 `subscribe()` 的返回值**
+
+`subscribe()` 的结果被解包成 `result, mid`。用 `MagicMock` 的话解包出来
+是两个 MagicMock，`result == MQTT_ERR_SUCCESS` 为 False——测试通过，
+但走的是"订阅失败"分支。写个显式的小假类（见 `test_consumer.py`）。
+
+**③ 时间用参数注入，不用真实时钟**
+
+`RetentionService.run_once(now=...)` 把"现在"变成显式参数，
+所以"删掉 3 天前的数据"不需要真的等三天。依赖隐式当前时间的清理逻辑
+只能靠"把库造得很旧"来绕，那种测试要么慢要么脆。
+
 ## 版本
 
 对应设计文档 §36 的版本节点：

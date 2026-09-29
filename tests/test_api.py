@@ -62,7 +62,10 @@ def test_health_returns_all_sections(client: TestClient) -> None:
     assert r.status_code == 200
 
     body = r.json()
-    for section in ("status", "now_ms", "mqtt", "ingest", "db", "data", "settings"):
+    # retention 是 Step 5 加的第五段。写在这里是为了让"少了一段"
+    # 立刻失败——/api/health 的段名就是对外契约，前端按段读。
+    for section in ("status", "now_ms", "mqtt", "ingest", "db",
+                    "retention", "data", "settings"):
         assert section in body, f"缺少 {section} 段"
 
 
