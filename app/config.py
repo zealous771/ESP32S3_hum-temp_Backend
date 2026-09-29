@@ -151,6 +151,25 @@ class Settings(BaseSettings):
     #   一眼能看懂的写法。配置项就一个，不值得为它引入版本相关的 API。
     cors_allow_origins: str = "*"
 
+    # ── Web 前端 ───────────────────────────────────────────────
+    #
+    # 前端构建产物（dist）的目录。
+    #
+    # ★ 默认值是**容器内**的路径 —— Dockerfile 里
+    #   `COPY --from=web-build /web/dist ./web/dist` 把它放在这里。
+    #
+    # ★ 这个目录不存在时后端**不挂载静态文件**，只打一条 WARNING，
+    #   API 照常工作。理由：后端不该因为"前端还没构建"而起不来。
+    #   API 是独立可用的，/docs 也是诊断工具——让容器起不来
+    #   等于把排查手段一起关掉了。
+    #
+    # ★ 为什么不自动去猜 ../web/dist 之类的相对路径：
+    #   隐式路径推断在不同工作目录下会给出不同结果（本机直跑时
+    #   CWD 是 backend/，容器里是 /app）。而症状是"页面 404 但
+    #   API 正常"——很难联想到是后端猜错了目录。
+    #   显式配置 + 不存在就明确告警，比自动推断好查得多。
+    web_dist_dir: str = "/app/web/dist"
+
     # ── 校验 ───────────────────────────────────────────────────
     @field_validator("log_level")
     @classmethod
@@ -202,6 +221,11 @@ class Settings(BaseSettings):
             return None
         # "sqlite:///" 去掉之后剩下的是以 / 开头的绝对路径
         return Path(self.database_url[len(_SQLITE_PREFIX):])
+
+    @property
+    def web_dist_path(self) -> Path:
+        """Web 前端产物的路径。``create_app`` 用它判断要不要挂载静态文件。"""
+        return Path(self.web_dist_dir)
 
     @property
     def mqtt_broker_repr(self) -> str:

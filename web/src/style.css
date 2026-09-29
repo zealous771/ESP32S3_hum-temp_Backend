@@ -1,0 +1,100 @@
+/**
+ * 全局样式与设计变量。
+ *
+ * ★ 所有颜色都走 CSS 变量，组件里不写死色值。
+ *
+ *   理由：语义色（ok / warn / bad）在页面上出现了几十次。写死的话，
+ *   想调整"警告黄"的深浅就得改十几个文件，而且一定会漏掉几处，
+ *   最后同一屏里出现三种略有差异的黄。
+ *   集中成变量之后，改一处就全变了。
+ *
+ * ★ 没有引入任何外部字体（Google Fonts / CDN）。
+ *
+ *   这个页面的使用场景是局域网内的内网工具，外链资源一旦不可达
+ *   （没外网、被墙、CDN 抖动），页面就会字体乱掉或者白屏一段时间。
+ *   系统字体栈在任何环境下都立刻可用，而且中文渲染质量更好。
+ */
+
+:root {
+  /* ── 中性色 ───────────────────────────────────────────────── */
+  --c-bg: #f5f7fa;
+  --c-surface: #ffffff;
+  --c-border: #e8ecf1;
+  --c-border-strong: #d3dae3;
+  --c-idle-bg: #f1f4f8;
+
+  /* ── 文字 ─────────────────────────────────────────────────── */
+  --c-text: #2b3440;
+  --c-text-strong: #101720;
+  --c-muted: #6b7683;
+
+  /* ── 强调色（链接、选中态、正常状态的主色）───────────────── */
+  --c-accent: #1c7ed6;
+
+  /* ── 语义色：正常 ─────────────────────────────────────────── */
+  --c-ok: #1f8a4c;
+  --c-ok-bg: #e9f7ef;
+  --c-ok-border: #bfe5cd;
+
+  /* ── 语义色：警告（偏离正常但还没坏）─────────────────────── */
+  --c-warn: #a86a00;
+  --c-warn-bg: #fff6e6;
+  --c-warn-border: #f0d5a3;
+
+  /* ── 语义色：故障（数据停了 / 连不上 / 约束被违反）───────── */
+  --c-bad: #c0392b;
+  --c-bad-bg: #fdecea;
+  --c-bad-border: #f3c3bd;
+
+  /* ── 字体 ─────────────────────────────────────────────────── */
+  --font-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Source Han Sans SC",
+    sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas,
+    "Liberation Mono", monospace;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--c-bg);
+  color: var(--c-text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 表单控件继承字体——不写的话 select 会退回浏览器默认的衬线字体 */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: inherit;
+}
+
+a {
+  color: var(--c-accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}

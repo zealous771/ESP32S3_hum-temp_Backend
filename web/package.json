@@ -1,0 +1,23 @@
+{
+  "name": "iot-web",
+  "version": "0.7.0",
+  "private": true,
+  "type": "module",
+  "description": "ESP32-S3 温湿度监控 · Web 仪表盘（设计文档 §24-§25）",
+  "scripts": {
+    "dev": "vite",
+    "build": "vue-tsc --noEmit && vite build",
+    "typecheck": "vue-tsc --noEmit",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "echarts": "6.1.0",
+    "vue": "3.5.43"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "6.0.9",
+    "typescript": "5.9.3",
+    "vite": "8.3.1",
+    "vue-tsc": "3.3.11"
+  }
+}

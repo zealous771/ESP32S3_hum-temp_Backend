@@ -30,6 +30,7 @@ from typing import Any, AsyncIterator
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.api import anomalies, devices, health, predictions, telemetry
@@ -163,6 +164,47 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(telemetry.router)
     app.include_router(anomalies.router)
     app.include_router(predictions.router)
+
+    # ── Web 前端（静态文件）────────────────────────────────────
+    #
+    # ★★ 这个 mount 必须放在**所有 API 路由之后**，这不是风格问题。
+    #
+    #   Starlette 按**注册顺序**匹配路由，而挂在 "/" 的 StaticFiles
+    #   会匹配所有路径。先挂它的话，/api/health 也会被它吃掉并返回
+    #   404（静态文件里没有这个名字的文件）——症状是"页面能打开、
+    #   但所有数据都是空的"，很容易误判成前端的问题去查 JS。
+    #
+    # ★ dist 不存在时**不挂载**，只打一条 WARNING。
+    #
+    #   后端不该因为"前端还没构建"而起不来。API 是独立可用的，
+    #   而 /docs（FastAPI 自带的接口文档）也是排查时的工具——
+    #   让容器起不来等于把排查手段一起关掉。
+    #   本机直跑 uvicorn 时必然走这条路径（前端跑在 Vite dev server 上），
+    #   所以这条 WARNING 在本机开发时是正常的。
+    dist_dir = settings.web_dist_path
+    if dist_dir.is_dir():
+        app.mount(
+            "/",
+            # html=True：请求目录时返回该目录下的 index.html。
+            # 也就是 GET / 会拿到 index.html。
+            #
+            # ★ 一个已知限制：它**不做 SPA 回退**。
+            #   本轮是单页、没有客户端路由，所以不影响。
+            #   将来加了 vue-router 的 history 模式（/devices、/anomalies
+            #   这类路径），直接刷新那些地址会 404——因为磁盘上没有
+            #   对应的文件。那时需要一个 catch-all 路由把未知路径
+            #   都返回 index.html。
+            StaticFiles(directory=str(dist_dir), html=True),
+            name="web",
+        )
+        logger.info("已挂载 Web 前端：%s", dist_dir)
+    else:
+        logger.warning(
+            "未找到 Web 前端产物（%s），本次只提供 API。"
+            "容器里出现这条 = Dockerfile 的 COPY --from=web-build 没生效；"
+            "本机直跑时出现这条是正常的。",
+            dist_dir,
+        )
 
     return app
 

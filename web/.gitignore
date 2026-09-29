@@ -1,0 +1,23 @@
+# 依赖与产物
+node_modules/
+dist/
+dist-ssr/
+
+# npm 的日志与缓存
+npm-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 编辑器
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Vite 的临时产物
+*.local
+.vite/

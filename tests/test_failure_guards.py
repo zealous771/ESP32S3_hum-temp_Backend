@@ -276,7 +276,6 @@ def test_module_getattr_does_not_create_app_on_import() -> None:
 
 # ── 6. sink 契约 ────────────────────────────────────────────────────
 
-
 def test_submit_never_blocks_when_queue_full(db: Database) -> None:
     """队列满时 submit() 必须立刻返回，**绝不阻塞**。
 
@@ -307,3 +306,77 @@ def test_submit_never_blocks_when_queue_full(db: Database) -> None:
     assert ingestor.stats.queue_dropped == 40
     # 水位贴着上限，说明"经常接近满"这件事被记录下来了
     assert ingestor.stats.queue_high_watermark == 10
+
+
+# ── 7. Web 静态文件的挂载 ───────────────────────────────────────────
+
+
+def _web_settings(tmp_path: Path, *, with_dist: bool) -> Settings:
+    """造一份带（或不带）前端产物的配置。"""
+    dist = tmp_path / "web" / "dist"
+    if with_dist:
+        dist.mkdir(parents=True)
+        (dist / "index.html").write_text(
+            "<!DOCTYPE html><title>iot-web</title><div id=app></div>", encoding="utf-8"
+        )
+        # 一个带子目录的静态资源，验证嵌套路径也能取到
+        assets = dist / "assets"
+        assets.mkdir()
+        (assets / "app.js").write_text("console.log('ok')", encoding="utf-8")
+
+    return Settings(
+        _env_file=None,
+        database_url=f"sqlite:///{tmp_path / 'iot.db'}",
+        mqtt_enabled=False,
+        web_dist_dir=str(dist),
+    )
+
+
+def test_web_mount_does_not_shadow_api_routes(tmp_path: Path) -> None:
+    """★ 静态文件挂在 "/" **不能**吃掉 /api 路由。
+
+    Starlette 按注册顺序匹配，而挂在 "/" 的 StaticFiles 会匹配所有路径。
+    如果它被注册在 API 路由之前，/api/health 会被它当成"一个不存在的
+    静态文件"返回 404 —— 症状是**页面能打开、但所有数据都是空的**，
+    极容易被误判成前端 JS 的问题去查半天。
+
+    所以这个用例断言的不是"首页能打开"，而是"首页能打开**并且**
+    API 还能用"。只测前者的话，顺序写反了照样通过。
+    """
+    settings = _web_settings(tmp_path, with_dist=True)
+    app = create_app(settings)
+
+    with TestClient(app) as client:
+        # 首页：StaticFiles(html=True) 把 / 映射到 index.html
+        home = client.get("/")
+        assert home.status_code == 200
+        assert "iot-web" in home.text
+
+        # 嵌套的静态资源
+        assert client.get("/assets/app.js").status_code == 200
+
+        # ★ 关键：API 没有被吃掉
+        assert client.get("/api/health").status_code == 200
+        assert client.get("/api/devices").status_code == 200
+
+        # FastAPI 自带的接口文档也还在（它是排查时的工具）
+        assert client.get("/openapi.json").status_code == 200
+
+
+def test_web_mount_skipped_when_dist_missing(tmp_path: Path) -> None:
+    """★ 前端产物不存在时**不挂载**，但后端必须照常起来。
+
+    后端不该因为"前端还没构建"而起不来——API 是独立可用的，
+    而且 /docs 是排查时的工具。让容器起不来等于把排查手段一起关掉。
+
+    本机直跑 uvicorn（前端跑在 Vite dev server 上）时必然走这条路径。
+    """
+    settings = _web_settings(tmp_path, with_dist=False)
+    app = create_app(settings)  # 不该抛
+
+    with TestClient(app) as client:
+        # API 正常
+        assert client.get("/api/health").status_code == 200
+        # 根路径没有东西可提供 → 404（而不是 500 或崩溃）
+        assert client.get("/").status_code == 404
+

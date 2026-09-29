@@ -124,6 +124,48 @@ broker 日志对齐时间，8 小时的偏差会让"哪个先发生"完全判断
 **③ 数据用 bind mount 挂在宿主机**，所以容器和"本机直跑 uvicorn"看到的是
 **同一个库文件**。代价与禁忌见下面"数据库"一节。
 
+## Web 仪表盘
+
+**前端在 `web/`**，由后端容器托管，和 API 同源同端口：
+
+```
+打开 http://localhost:8005      → 仪表盘
+打开 http://localhost:8005/docs → 接口文档
+```
+
+不需要额外启动任何东西——镜像里已经包含了前端产物（多阶段构建，
+见 `Dockerfile` 的阶段 1）。完整说明见 `web/README.md`。
+
+### 为什么让后端托管，而不是独立容器 + nginx
+
+**同源**。前端和 API 在同一个 origin 下，浏览器不会把请求当成跨域，
+于是**开发和生产都不需要 CORS**。少一套只在某个环境才生效的配置，
+也就少一类"本地好好的、部署就跨域"的问题。
+
+代价：改前端要重建后端镜像。但依赖层是单独缓存的（`npm ci` 那一步），
+改源码的重建在一分钟级。改前端频繁时用 Vite dev server（见 `web/README.md`）。
+
+### 三个必须知道的点
+
+**① 静态文件挂在 `/`，必须在所有 API 路由之后注册**
+
+Starlette 按注册顺序匹配，而挂在 `/` 的 `StaticFiles` 会匹配所有路径。
+先挂它的话 `/api/health` 也会被它吃掉并返回 404——症状是
+**页面能打开但所有数据都是空的**，很容易误判成前端 JS 的问题。
+有测试盯住这个顺序（`test_web_mount_does_not_shadow_api_routes`）。
+
+**② `web/dist` 不存在时后端照常启动，只打一条 WARNING**
+
+后端不该因为"前端还没构建"而起不来。API 是独立可用的，
+`/docs` 也是排查工具——让容器起不来等于把排查手段一起关掉。
+本机直跑 uvicorn 时必然走这条路径（前端跑在 Vite dev server 上）。
+
+**③ 前端的 TypeScript 类型是 `app/api/schemas.py` 的手写镜像**
+
+改后端响应模型时必须同步改 `web/src/api/types.ts`，否则前端会在
+运行期拿到 `undefined`——而 TypeScript 不会报错（它相信你手写的类型）。
+这是当前已知的、值得后续改进的一点（见 `web/README.md` 的"已知限制"）。
+
 ## 目录结构
 
 ```
@@ -143,6 +185,10 @@ app/
 tools/
 ├── mqtt_print.py      只连 broker 打印报文（Step 1 的入口，也是排障工具）
 └── healthcheck.py     容器 HEALTHCHECK 的探针
+web/                   Web 仪表盘（Vue 3 + TS + ECharts）
+├── src/api/types.ts     ★ 后端 app/api/schemas.py 的镜像（改后端要同步改它）
+├── src/components/      卡片 / 折线图 / 数据质量面板
+└── README.md            前端说明与已知限制 ← 改前端先看这个
 deploy/                MQTT broker 的 compose + 配置 + 部署说明
 ├── docker-compose.yml   mosquitto（接入共享网络 iot-net）
 ├── mosquitto/mosquitto.conf
