@@ -260,9 +260,43 @@ SQLAlchemy 对 `sqlite:///:memory:` 用 `SingletonThreadPool`，也就是
 
 ## 版本
 
-对应设计文档 §36 的版本节点：
+对应设计文档 §36 的版本节点。tag 打在**能独立验收**的那个提交上，
+不是"功能写完了"的提交上——所以 `v0.5-python` 指向 Step 1 那次提交，
+那时它就已经能独立跑通"连上 broker 并打印"了。
 
-| tag | 内容 |
-|---|---|
-| `v0.5-python` | MQTT → Python 打印（不碰数据库） |
-| `v0.6-database` | MQTT → SQLite → FastAPI 七个路由 |
+| tag | 指向 | 内容 |
+|---|---|---|
+| `v0.5-python` | Step 1 | MQTT → Python 打印（**不碰数据库**） |
+| `v0.6-database` | Step 8 | MQTT → SQLite → FastAPI 七个路由 + 容器化 |
+
+```bash
+git tag -l -n99          # 看 tag 和它的说明
+git show v0.6-database   # 看那个版本改了什么
+```
+
+### 当前状态（2026-09-29 实测）
+
+```
+iot-backend  Up (healthy)      mosquitto  Up
+mqtt.host = mosquitto   connected = True   connects = 2
+db.journal_mode = wal   telemetry rows 持续增长
+ingest.running = True   丢弃 = 0
+data.stale = False
+136 passed, 覆盖率 97.5%
+```
+
+端到端验收（计划 §10 的完整清单，15 项）全部通过，
+另含文档 §18 的恢复测试：**重启 broker → 1 秒内重连并重新订阅，零丢失**。
+
+### 还没做的
+
+| 项 | 文档 | 说明 |
+|---|---|---|
+| Web 前端 | §24-§25 | 后端七个路由已就绪，`/docs` 可交互式看接口 |
+| AI（异常检测 / 预测） | §26-§33 | 目录与接口占位已就位；**前置条件是先积累几周真实数据** |
+| TLS / 鉴权 | §39 | 开发阶段 `allow_anonymous` + `CORS=*` |
+| Alembic 迁移 | — | 开发期改 schema 就是删库重建（有 `PRAGMA user_version` 兜底） |
+
+**AI 不是"还没写"，是"还不能写"**：文档 §26 的第一原则是
+"先有数据，再训练模型"。库里的数据从 2026-09-28 才开始积累。
+
