@@ -34,6 +34,16 @@
  *   ③ **数据质量面板是这一页的主角，不是附录。**
  *      一条温度曲线在设备停发时只是"停止延伸"——和"还没加载完"
  *      看起来差不多。所以"数据还在不在流"必须由面板明确回答。
+ *
+ *   ④ **画曲线一律走降采样接口，但"报得准"的数据另走一条。**
+ *      设备 2 秒一条，而 `/api/telemetry` 的分页上限是 1000 条
+ *      —— 只能覆盖 **33 分钟**。所以曲线走 `/api/telemetry/series`
+ *      按 `bucket_ms` 聚合；而数据质量面板要的 `received_at` / `seq`
+ *      必须来自逐条原始记录（`/api/telemetry?limit=1`）。
+ *
+ *      两条数据源刻意分开：**降采样接口不该假装自己能回答逐条的问题**。
+ *      让它在桶里"随便挑一条"返回 received_at，面板上那个数字就变成
+ *      假的了 —— 而它恰恰是用来判断数据真假的。
  */
 
 import { computed, ref, watch } from 'vue'
@@ -44,6 +54,7 @@ import type {
   HealthResponse,
   LatestTelemetryOut,
   Page,
+  TelemetryBucketOut,
   TelemetryOut,
 } from './api/types'
 import DataQualityPanel from './components/DataQualityPanel.vue'
@@ -64,26 +75,52 @@ const DEVICE_POLL_MS = 30_000
 /**
  * 固件侧的采样周期（`CONFIG_BOARD_SAMPLE_INTERVAL_MS`）。
  *
- * ★ 用它算 limit 是个**隐含耦合**：固件改了采样周期，这里不会自动跟着变。
- *   后果是窗口内的点数估算不准——改快了会取不满，改慢了会取多。
- *   两者都只是"显示的点数不对"，不会出错，所以先这样；
- *   真要做对，应该由后端提供一个 `bucket` 降采样参数（见 README 的已知缺口）。
+ * ★ 用它当"最短窗口的桶宽"是个**隐含耦合**：固件改了采样周期，
+ *   这里不会自动跟着变。影响只是最短窗口的平滑程度，不会出错。
  */
 const SAMPLE_INTERVAL_MS = 2000
 
-const WINDOWS = [
-  { label: '5 分钟', minutes: 5 },
-  { label: '15 分钟', minutes: 15 },
-  { label: '30 分钟', minutes: 30 },
-] as const
+interface WindowOption {
+  label: string
+  minutes: number
+  /** 时间桶宽度（毫秒）。等于采样周期时相当于取原始记录。 */
+  bucketMs: number
+}
 
-/** 30 分钟 = 900 点。再长就会超过后端的 limit 上限（1000），所以不做 1 小时。 */
-const MAX_LIMIT = 1000
+/**
+ * 可选的时间窗口。
+ *
+ * ★ 每个档位配一个 `bucketMs`，目标是**点数保持在 300 上下**：
+ *   太少看不出形状，太多也画不下（30 分钟 900 点已经是屏幕像素的
+ *   两三倍了）。
+ *
+ * ★ 为什么必须降采样，而不是简单把窗口调大：
+ *   `/api/telemetry` 的分页上限是 1000 条，设备 2 秒一条
+ *   —— 1000 × 2 秒 = **33 分钟**，这就是原来的天花板。
+ *
+ *   实测数据：半小时窗口内温度跨度 **0.0℃**（室内环境，DHT11 分辨率
+ *   1℃ 确实没变），而 24 小时跨度 2.0℃、3 天 4.0℃。
+ *   **要看温度变化就必须拉长时间窗口，而拉长必然超过 1000 条**，
+ *   所以走 `/api/telemetry/series` 按桶聚合。
+ */
+const DEFAULT_WINDOW: WindowOption = {
+  label: '24 小时',
+  minutes: 1440,
+  bucketMs: 300_000,
+}
+
+const WINDOWS: WindowOption[] = [
+  { label: '15 分钟', minutes: 15, bucketMs: SAMPLE_INTERVAL_MS },
+  { label: '1 小时', minutes: 60, bucketMs: 10_000 },
+  { label: '6 小时', minutes: 360, bucketMs: 60_000 },
+  DEFAULT_WINDOW,
+  { label: '3 天', minutes: 4320, bucketMs: 900_000 },
+]
 
 // ── 状态 ────────────────────────────────────────────────────────────
 
 const selectedDeviceId = ref<string | null>(null)
-const windowMinutes = ref<number>(15)
+const windowMinutes = ref<number>(DEFAULT_WINDOW.minutes)
 
 const health = usePolling<HealthResponse>(() => api.health(), POLL_MS)
 
@@ -109,26 +146,65 @@ const latest = usePolling<LatestTelemetryOut | null>(
   POLL_MS,
 )
 
-const telemetry = usePolling<Page<TelemetryOut>>(
+/** 当前选中的窗口档位（含它对应的桶宽）。 */
+const currentWindow = computed<WindowOption>(
+  () => WINDOWS.find((w) => w.minutes === windowMinutes.value) ?? DEFAULT_WINDOW,
+)
+
+/**
+ * 曲线数据 —— 走**降采样**接口。
+ *
+ * 锚点仍是"最新数据的 ts"（设计决定 ①）：`start` 过滤的是设备时钟 `ts`。
+ */
+const telemetry = usePolling<Page<TelemetryBucketOut>>(
   () => {
     const deviceId = selectedDeviceId.value
     if (!deviceId) {
-      return Promise.resolve<Page<TelemetryOut>>({ total: 0, limit: 0, offset: 0, items: [] })
+      return Promise.resolve<Page<TelemetryBucketOut>>({
+        total: 0,
+        limit: 0,
+        offset: 0,
+        items: [],
+      })
     }
     // ← 设计决定 ①：锚在最新数据的 ts 上
-    const anchor =
-      latest.data.value?.ts ?? health.data.value?.now_ms ?? Date.now()
-    const windowMs = windowMinutes.value * 60_000
-    const limit = Math.min(
-      Math.ceil(windowMs / SAMPLE_INTERVAL_MS) + 10,
-      MAX_LIMIT,
-    )
-    return api.telemetry({
+    const anchor = latest.data.value?.ts ?? health.data.value?.now_ms ?? Date.now()
+    const win = currentWindow.value
+    return api.telemetrySeries({
       device_id: deviceId,
-      start: anchor - windowMs,
-      order: 'desc',
-      limit,
+      start: anchor - win.minutes * 60_000,
+      bucket_ms: win.bucketMs,
     })
+  },
+  POLL_MS,
+)
+
+/**
+ * 最新一条**原始**记录 —— 只给数据质量面板用。
+ *
+ * ★ 为什么不复用上面那份曲线数据：
+ *   降采样之后 `ts` 是**桶起点**，而且聚合结果里**没有 `received_at`
+ *   和 `seq`**（一个桶里有很多条，保留其中任何一条都会误导）。
+ *   而数据质量面板恰恰要靠 `received_at` 画"两条时间轴"、
+ *   靠 `seq` 看跳号。
+ *
+ * ★ 代价是每 5 秒多一个请求，但 `limit=1`，响应体只有几百字节。
+ *   这个代价值得付：**降采样接口不该假装自己能回答逐条的问题**。
+ *   真让它在桶里"随便挑一条"返回 received_at，面板上那个数字就变成
+ *   假的了 —— 而它恰恰是用来判断数据真假的。
+ */
+const newestRaw = usePolling<Page<TelemetryOut>>(
+  () => {
+    const deviceId = selectedDeviceId.value
+    if (!deviceId) {
+      return Promise.resolve<Page<TelemetryOut>>({
+        total: 0,
+        limit: 0,
+        offset: 0,
+        items: [],
+      })
+    }
+    return api.telemetry({ device_id: deviceId, order: 'desc', limit: 1 })
   },
   POLL_MS,
 )
@@ -164,17 +240,70 @@ const currentDevice = computed<DeviceOut | null>(
  *   设备跑了一整天之后，那 N 条可能是几天前的——曲线看着有数据，
  *   其实是陈年旧账。
  */
-const ascendingRows = computed<TelemetryOut[]>(() =>
-  [...(telemetry.data.value?.items ?? [])].reverse(),
+/**
+ * 曲线用的点，**显式按 ts 升序排序**。
+ *
+ * ★ 不依赖后端的返回顺序 —— 这里踩过一次：
+ *
+ *   原来是 `[...items].reverse()`，因为 `/api/telemetry` 用
+ *   `order=desc` 返回（这样能拿"最新的 N 条"）。但画曲线改走
+ *   `/api/telemetry/series` 之后，那个接口返回的是**升序**
+ *   （后端 `order_by(bucket_expr)`）—— 再 reverse 就变成降序，
+ *   于是曲线左右颠倒，而且下面插缺口的判断也会失效
+ *   （`row.ts - prev.ts` 算出来是负数，永远不大于阈值）。
+ *
+ *   显式排序之后，两个接口的顺序差异不再影响这里。
+ *   `sort` 比 `reverse` 贵一点，但几百个点可以忽略。
+ */
+const ascendingRows = computed<TelemetryBucketOut[]>(() =>
+  [...(telemetry.data.value?.items ?? [])].sort((a, b) => a.ts - b.ts),
 )
 
-/** 最新一条遥测（desc 的第一条）。用于卡片和数据质量面板。 */
+/**
+ * 最新一条**原始**遥测。
+ *
+ * 用于数据质量面板的两条时间轴（`ts` / `received_at`）和 seq 跳号 ——
+ * 这三样都必须来自逐条记录，降采样后的桶里没有。
+ */
 const newestRow = computed<TelemetryOut | null>(
-  () => telemetry.data.value?.items[0] ?? null,
+  () => newestRaw.data.value?.items[0] ?? null,
 )
 
-function toPoints(pick: (row: TelemetryOut) => number | null): ChartPoint[] {
-  return ascendingRows.value.map((row) => ({ ts: row.ts, value: pick(row) }))
+/**
+ * 曲线用的点。
+ *
+ * ★ 缺口处必须**插一个 null**，否则图表会撒谎。
+ *
+ *   降采样之后点与点之间是稀疏的：24 小时窗口里一个点代表 5 分钟。
+ *   而实测出现过 **18.8 小时**的缺口（设备/后端停机）。
+ *   ECharts 的时间轴会把相邻两点用直线连起来，**不管中间隔了多久**
+ *   —— 于是"18.8 小时没有数据"在图上看起来就是"温度在几分钟内
+ *   从 35℃ 掉到 33℃"。
+ *
+ *   这和 `connectNulls: false` 要解决的是同一类问题：
+ *   **中断不能画成正常数据**。插一个 null 之后，配合
+ *   `connectNulls: false`，那一段会如实断开。
+ *
+ *   阈值取 **3 倍桶宽**：正常波动（偶尔丢一两条报文）不会断开，
+ *   真的断了才断。
+ */
+function toPoints(pick: (row: TelemetryBucketOut) => number | null): ChartPoint[] {
+  const rows = ascendingRows.value
+  const gapLimit = currentWindow.value.bucketMs * 3
+  const out: ChartPoint[] = []
+
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i] as TelemetryBucketOut
+    if (i > 0) {
+      const prev = rows[i - 1] as TelemetryBucketOut
+      const delta = row.ts - prev.ts
+      if (delta > gapLimit) {
+        out.push({ ts: prev.ts + delta / 2, value: null })
+      }
+    }
+    out.push({ ts: row.ts, value: pick(row) })
+  }
+  return out
 }
 
 const temperaturePoints = computed(() => toPoints((r) => r.temperature))
@@ -244,6 +373,7 @@ const firstError = computed(
     health.error.value ??
     latest.error.value ??
     telemetry.error.value ??
+    newestRaw.error.value ??
     devices.error.value ??
     null,
 )
@@ -259,6 +389,7 @@ const refreshAll = (): void => {
   void devices.refresh()
   void latest.refresh()
   void telemetry.refresh()
+  void newestRaw.refresh()
 }
 </script>
 
@@ -387,7 +518,7 @@ const refreshAll = (): void => {
         :points="temperaturePoints"
         color="#d9480f"
         :loading="cardsLoading"
-        :min-span="4"
+        :min-span="2"
       />
       <TimeSeriesChart
         title="湿度曲线"
@@ -409,7 +540,8 @@ const refreshAll = (): void => {
     <footer class="footer">
       <span>
         数据来源 <code>/api/health</code> · <code>/api/devices</code> ·
-        <code>/api/devices/{id}/latest</code> · <code>/api/telemetry</code>
+        <code>/api/devices/{id}/latest</code> · <code>/api/telemetry</code> ·
+        <code>/api/telemetry/series</code>
       </span>
       <span>
         接口文档：<a href="/docs" target="_blank" rel="noopener">/docs</a>

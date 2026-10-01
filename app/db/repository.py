@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import Integer, func, select
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
@@ -289,6 +289,101 @@ def query_telemetry(
         .offset(offset)
     )
     return total, session.execute(stmt).scalars().all()
+
+
+def query_telemetry_bucketed(
+    session: Session,
+    *,
+    device_id: str | None = None,
+    start_ms: int | None = None,
+    end_ms: int | None = None,
+    bucket_ms: int = 60_000,
+    include_boot: bool = False,
+) -> tuple[int, list[dict[str, Any]]]:
+    """按时间桶聚合查遥测，返回 ``(桶数, 桶列表)``。
+
+    ★ 为什么需要它
+
+      设备每 2 秒上报一条，而 ``query_telemetry`` 的分页上限是
+      ``MAX_LIMIT = 1000`` —— 只能覆盖 **33 分钟**。
+
+      实测过：半小时窗口内温度跨度是 0.0℃（室内环境，DHT11 分辨率
+      1℃ 确实没变），而 24 小时跨度 2.0℃、48 小时 4.0℃。
+      **要看温度变化就必须拉长时间窗口，而拉长就必然超过 1000 条。**
+
+      两条路：要么被截断（图上只剩一小段），要么把 4 万多条记录
+      （约 5 MB JSON）整个传回浏览器、每 5 秒一次。都不行。
+      所以降采样是唯一解 —— 24 小时按 5 分钟分桶 = 288 个点。
+
+    ── 聚合口径的三个选择 ──────────────────────────────────────────
+
+    **① 用 AVG，不用 MIN/MAX**
+
+      MIN/MAX 会画出锯齿：每个桶取极值时，相邻桶的极值不连续，
+      曲线看起来在剧烈震荡 —— 而那是采样噪声，不是真实趋势。
+      AVG 相当于低通滤波，保留趋势、抑制噪声。
+
+      代价是丢掉了桶内极值信息。所以响应里带 ``samples``：
+      想知道"那 5 分钟里最高多少度"得看原始记录，
+      而 ``samples`` 至少能让人判断这个桶是满的还是残缺的。
+
+    **② ts 用桶的起点，不用桶内平均时刻**
+
+      桶起点是**确定的**（一定是 ``bucket_ms`` 的整数倍），
+      前端可以拿它对齐 x 轴刻度；平均时刻会随数据分布漂移。
+
+    **③ 桶内没有有效值时返回 NULL，不返回 0**
+
+      ``avg(rssi)`` 在整桶都是 NULL 时结果是 NULL，原样带出去。
+      填 0 会被前端画成"信号极强"（0 dBm 是合法强信号），
+      那是把"没有数据"伪装成"数据很好"。
+
+    ── 实现 ────────────────────────────────────────────────────────
+
+    SQLite 的整数除法：两边都是整数时 ``ts / bucket_ms`` 向下取整，
+    再乘回 ``bucket_ms`` 就得到桶起点。显式 ``cast(... AS INTEGER)``
+    是为了避免 SQLAlchemy 的类型推断把除法做成浮点。
+    """
+    conditions = []
+    if device_id is not None:
+        conditions.append(Telemetry.device_id == device_id)
+    if start_ms is not None:
+        conditions.append(Telemetry.ts >= start_ms)
+    if end_ms is not None:
+        conditions.append(Telemetry.ts <= end_ms)
+    if not include_boot:
+        conditions.append(Telemetry.clock == "unix")
+
+    bucket_expr = func.cast(Telemetry.ts / bucket_ms, Integer) * bucket_ms
+
+    stmt = (
+        select(
+            bucket_expr.label("bucket_ts"),
+            func.avg(Telemetry.temperature).label("temperature"),
+            func.avg(Telemetry.humidity).label("humidity"),
+            func.avg(Telemetry.rssi).label("rssi"),
+            func.count().label("samples"),
+        )
+        .where(*conditions)
+        .group_by(bucket_expr)
+        .order_by(bucket_expr)
+    )
+
+    rows = [
+        {
+            "ts": int(r.bucket_ts),
+            "temperature": r.temperature,
+            "humidity": r.humidity,
+            "rssi": r.rssi,
+            "samples": int(r.samples),
+        }
+        for r in session.execute(stmt).all()
+    ]
+
+    # 不分页：调用方按"目标点数 ~300"来选 bucket_ms，
+    # 桶数天然就在几百这个量级。total 报**桶数**而不是原始行数，
+    # 这样 Page 的语义仍然是"这次查询匹配到几条"。
+    return len(rows), rows
 
 
 def count_telemetry(session: Session) -> int:

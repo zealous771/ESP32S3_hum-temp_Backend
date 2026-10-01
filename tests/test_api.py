@@ -272,11 +272,15 @@ def test_predictions_empty_but_valid(seeded: TestClient) -> None:
 # ── OpenAPI ─────────────────────────────────────────────────────────
 
 
-def test_openapi_lists_all_seven_routes(client: TestClient) -> None:
-    """设计文档 §23 要求的七个路由必须全部存在。
+def test_openapi_lists_required_routes(client: TestClient) -> None:
+    """设计文档 §23 要求的七个路由必须全部存在（本轮又加了一个）。
 
     这条测试的价值：将来有人重构路由前缀时，会立刻失败，
     而不是等前端联调时才发现少了一个。
+
+    ``/api/telemetry/series`` **不在 §23 里** —— 它是为了解决
+    "曲线画不出长时间窗口"（分页上限 1000 条 = 只能覆盖 33 分钟）
+    而加的实现层接口，一并在这里锁住。
     """
     paths = client.get("/openapi.json").json()["paths"]
     expected = {
@@ -285,7 +289,68 @@ def test_openapi_lists_all_seven_routes(client: TestClient) -> None:
         "/api/devices/{device_id}",
         "/api/devices/{device_id}/latest",
         "/api/telemetry",
+        "/api/telemetry/series",
         "/api/anomalies",
         "/api/predictions",
     }
     assert expected <= set(paths), f"缺少路由：{expected - set(paths)}"
+
+
+# ── /api/telemetry/series（降采样）──────────────────────────────────
+
+
+def test_series_returns_buckets(seeded: TestClient) -> None:
+    """返回桶结构，且**不带**逐条字段。"""
+    r = seeded.get(
+        "/api/telemetry/series",
+        params={"device_id": DEVICE, "bucket_ms": 10_000},
+    )
+    assert r.status_code == 200
+
+    body = r.json()
+    assert body["total"] >= 1
+
+    item = body["items"][0]
+    for field in ("ts", "temperature", "humidity", "rssi", "samples"):
+        assert field in item, f"缺少 {field}"
+
+    # ★ 降采样结果里**不该有**逐条字段 —— 一个桶里有很多条记录，
+    #   保留其中任何一条都会误导（尤其是 received_at 和 seq，
+    #   数据质量面板要靠它们判断数据真假）
+    for absent in ("id", "seq", "received_at", "clock"):
+        assert absent not in item, f"降采样结果不该有 {absent}"
+
+
+def test_series_default_bucket_is_60_seconds(seeded: TestClient) -> None:
+    """不传 bucket_ms 时默认 60 秒 —— 桶起点一定落在 60 秒的整数倍上。"""
+    r = seeded.get("/api/telemetry/series", params={"device_id": DEVICE})
+    assert r.status_code == 200
+    for item in r.json()["items"]:
+        assert item["ts"] % 60_000 == 0
+
+
+def test_series_rejects_bucket_below_one_second(seeded: TestClient) -> None:
+    """桶比 1 秒还窄没有意义（采样周期本身就是 2 秒）→ 422。"""
+    r = seeded.get("/api/telemetry/series", params={"bucket_ms": 100})
+    assert r.status_code == 422
+
+
+def test_series_rejects_bucket_above_one_day(seeded: TestClient) -> None:
+    """桶宽上限一天 —— 再大就不是"曲线"而是"几个点了"。"""
+    r = seeded.get("/api/telemetry/series", params={"bucket_ms": 999_999_999})
+    assert r.status_code == 422
+
+
+def test_series_is_much_smaller_than_raw(seeded: TestClient) -> None:
+    """★ 这个接口存在的理由：同样范围，粗桶的点数远少于原始行数。"""
+    params = {"device_id": DEVICE}
+    raw = seeded.get("/api/telemetry", params={**params, "limit": 1000}).json()
+    fine = seeded.get(
+        "/api/telemetry/series", params={**params, "bucket_ms": 1_000}
+    ).json()
+    coarse = seeded.get(
+        "/api/telemetry/series", params={**params, "bucket_ms": 60_000}
+    ).json()
+
+    assert coarse["total"] <= fine["total"] <= raw["total"]
+    assert coarse["total"] < raw["total"], "粗桶必须真的减少点数"

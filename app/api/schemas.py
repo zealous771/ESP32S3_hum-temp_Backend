@@ -64,6 +64,33 @@ class TelemetryOut(BaseModel):
     clock: str = Field(description="ts 的时间基准：unix / boot")
 
 
+class TelemetryBucketOut(BaseModel):
+    """降采样后的一条记录：一个时间桶的聚合值。
+
+    ★ 字段比 ``TelemetryOut`` **少**，而且刻意如此：
+
+      - 没有 ``id`` / ``seq``：一个桶里有很多条，聚合之后这两个
+        字段没有意义（保留任何一条都会误导）
+      - 没有 ``received_at``：同理由
+      - 多一个 ``samples``：桶内的样本数
+
+    前端画曲线只需要 ``ts`` + 值，所以少这些字段不影响。
+    需要完整信息时（比如数据质量面板要看 ``received_at`` 和 ``seq``）
+    应该去查 ``/api/telemetry`` 的原始记录，而不是这个接口 ——
+    **降采样接口不该假装自己能回答逐条的问题。**
+    """
+
+    ts: int = Field(description="时间桶的起点（Unix 毫秒，左闭右开）")
+    temperature: float | None = Field(
+        default=None, description="桶内平均温度；桶内无有效值时是 null"
+    )
+    humidity: float | None = Field(default=None, description="桶内平均湿度")
+    rssi: float | None = Field(
+        default=None, description="桶内平均 RSSI；设备全程未联网时是 null"
+    )
+    samples: int = Field(description="桶内样本数。远小于预期说明这段有缺口")
+
+
 class LatestTelemetryOut(BaseModel):
     """``GET /api/devices/{id}/latest`` 的响应。
 

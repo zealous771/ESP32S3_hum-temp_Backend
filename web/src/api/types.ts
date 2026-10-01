@@ -48,6 +48,29 @@ export interface TelemetryOut {
 }
 
 /**
+ * `GET /api/telemetry/series` 的一条记录：一个时间桶的聚合值。
+ *
+ * ★ 字段比 `TelemetryOut` **少**，而且刻意如此——一个桶里有很多条记录，
+ *   `id` / `seq` / `received_at` 保留其中任何一条都会误导。
+ *
+ * ★ 用它画曲线时注意：**`ts` 是桶的起点，不是采样时刻**。
+ *   两个相邻点最多相差一个 `bucket_ms`，所以这份数据**不能**用来判断
+ *   "设备有没有按时上报"——那要看原始记录或 `/api/health`。
+ */
+export interface TelemetryBucketOut {
+  /** 时间桶的起点（Unix 毫秒，左闭右开） */
+  ts: number
+  /** 桶内平均温度；桶内无有效值时是 null */
+  temperature: number | null
+  /** 桶内平均湿度；桶内无有效值时是 null */
+  humidity: number | null
+  /** 桶内平均 RSSI；设备全程未联网时是 null（**不是 0**） */
+  rssi: number | null
+  /** 桶内样本数。远小于预期说明这段有缺口 */
+  samples: number
+}
+
+/**
  * `GET /api/devices/{id}/latest` 的响应。
  *
  * 字段集合**恰好**是设计文档 §23 示例里的 5 个。刻意不含 received_at / seq——

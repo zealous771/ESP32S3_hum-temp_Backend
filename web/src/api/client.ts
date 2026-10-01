@@ -20,6 +20,7 @@ import type {
   LatestTelemetryOut,
   Page,
   PredictionOut,
+  TelemetryBucketOut,
   TelemetryOut,
 } from './types'
 
@@ -118,6 +119,14 @@ export interface TelemetryQuery {
   offset?: number
   /** asc / desc，默认 desc */
   order?: 'asc' | 'desc'
+  /**
+   * 时间桶宽度（毫秒）。**只有 `/api/telemetry/series` 认这个参数**。
+   *
+   * 给定时每条返回记录代表一个桶的聚合值（ts 是桶起点），
+   * 于是"24 小时窗口"才装得下——逐条返回的话 2 秒一条会超出
+   * 1000 条的分页上限（只覆盖 33 分钟）。
+   */
+  bucket_ms?: number
 }
 
 export const api = {
@@ -139,6 +148,29 @@ export const api = {
       limit: query.limit,
       offset: query.offset,
       order: query.order,
+    }),
+
+  /**
+   * 降采样时间序列 —— 长时间窗口画曲线用。
+   *
+   * ★ 和 `telemetry()` 的分工：
+   *
+   *   telemetry()        逐条原始记录。受 MAX_LIMIT=1000 约束，
+   *                      2 秒一条 → 最多覆盖 **33 分钟**。
+   *                      要 `received_at` / `seq` 的场合（数据质量面板）
+   *                      只能用这个。
+   *
+   *   telemetrySeries()  按 `bucket_ms` 聚合。24 小时用 5 分钟桶
+   *                      只有 288 个点。**画长窗口曲线只能用这个。**
+   *
+   *   两个都不传 limit：series 不分页（桶数天然只有几百）。
+   */
+  telemetrySeries: (query: TelemetryQuery) =>
+    getJson<Page<TelemetryBucketOut>>('/api/telemetry/series', {
+      device_id: query.device_id,
+      start: query.start,
+      end: query.end,
+      bucket_ms: query.bucket_ms,
     }),
 
   anomalies: (query: { device_id?: string; limit?: number } = {}) =>

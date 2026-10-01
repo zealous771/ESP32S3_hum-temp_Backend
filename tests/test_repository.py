@@ -24,7 +24,7 @@ import pytest
 from app.config import Settings
 from app.db import repository as repo
 from app.db.database import Database
-from app.db.models import Anomaly, Prediction
+from app.db.models import Anomaly, Prediction, Telemetry
 from app.services.telemetry_service import TelemetryIngestor
 from tests.test_ingestor import make_status, make_telemetry
 
@@ -257,3 +257,211 @@ def test_find_receive_gaps_can_be_scoped(db: Database, ingestor_seed: None) -> N
     assert len(gaps_scoped) <= len(gaps_all)
     # since_ms 设成一个未来时刻 → 没有起点晚于它的行 → 没有断层
     assert gaps_since == []
+
+
+# ── 降采样：query_telemetry_bucketed ────────────────────────────────
+#
+# ★ 这个函数存在的理由（值得写在测试里，因为"为什么要降采样"很容易忘）：
+#
+#   设备 2 秒一条，而 query_telemetry 的分页上限是 MAX_LIMIT = 1000
+#   —— 只能覆盖 **33 分钟**。实测过：半小时窗口内温度跨度 0.0℃
+#   （室内环境，DHT11 分辨率 1℃ 确实没变），而 24 小时跨度 2.0℃。
+#   **要看温度变化就必须拉长时间窗口，而拉长必然超过 1000 条。**
+
+BUCKET_MS = 10_000
+
+
+def _seed_bucketed(db: Database) -> None:
+    """塞入**温度递增**的记录，让每个桶的平均值可预测。
+
+    ★ 不能用 ``make_telemetry``：它的温度来自 REAL_PAYLOAD 的固定值
+      （32 / 73），每个桶的 avg 都一样，就验证不出聚合对不对。
+      所以这里直接构造 ``Telemetry`` 行。
+
+    时间布局（``bucket_ms = 10 秒``，BASE_TS 恰好是 10 秒的整数倍）：
+
+      桶 0  [BASE_TS,        BASE_TS+10_000)  3 条  温度 30/31/32
+      桶 1  [BASE_TS+10_000, BASE_TS+20_000)  2 条  温度 34/36
+
+    另外各塞一条**别的设备**和一条 **boot 行**，用来验证过滤。
+    """
+    _ensure_devices(db, DEVICE, OTHER)
+
+    def row(*, ts: int, temp: float, hum: float, rssi: int | None, seq: int,
+            device_id: str = DEVICE, clock: str = "unix") -> Telemetry:
+        return Telemetry(
+            device_id=device_id,
+            ts=BASE_TS + ts,
+            received_at=BASE_TS + ts,
+            temperature=temp,
+            humidity=hum,
+            rssi=rssi,
+            seq=seq,
+            clock=clock,
+        )
+
+    with db.session() as s:
+        s.add_all(
+            [
+                row(ts=0, temp=30.0, hum=60.0, rssi=-40, seq=1),
+                row(ts=2_000, temp=31.0, hum=62.0, rssi=-42, seq=2),
+                row(ts=4_000, temp=32.0, hum=64.0, rssi=-44, seq=3),
+                row(ts=10_000, temp=34.0, hum=70.0, rssi=-50, seq=4),
+                row(ts=12_000, temp=36.0, hum=72.0, rssi=-52, seq=5),
+                # 别的设备：温度 99，如果过滤失效会被平均进来
+                row(ts=0, temp=99.0, hum=99.0, rssi=-99, seq=1, device_id=OTHER),
+                # boot 行：温度 88，默认应被排除
+                row(ts=0, temp=88.0, hum=88.0, rssi=-88, seq=6, clock="boot"),
+            ]
+        )
+
+
+def test_bucketed_groups_by_time_window(db: Database) -> None:
+    """同一桶内的多条聚合成一条，且 ts 是**桶起点**。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        total, rows = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS
+        )
+
+    assert total == 2 and len(rows) == 2
+
+    b0, b1 = rows
+    # ★ ts 必须是 bucket_ms 的整数倍（桶起点），不是桶内某条记录的时刻
+    assert b0["ts"] % BUCKET_MS == 0
+    assert b1["ts"] % BUCKET_MS == 0
+    assert b1["ts"] - b0["ts"] == BUCKET_MS
+    assert b0["samples"] == 3
+    assert b1["samples"] == 2
+
+
+def test_bucketed_averages_values(db: Database) -> None:
+    """桶内的值是 AVG —— 不是 MIN、MAX，也不是"随便挑一条"。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        _, rows = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS
+        )
+
+    b0, b1 = rows
+    assert b0["temperature"] == pytest.approx((30 + 31 + 32) / 3)
+    assert b0["humidity"] == pytest.approx((60 + 62 + 64) / 3)
+    assert b0["rssi"] == pytest.approx((-40 - 42 - 44) / 3)
+    assert b1["temperature"] == pytest.approx((34 + 36) / 2)
+
+
+def test_bucketed_excludes_boot_rows_by_default(db: Database) -> None:
+    """boot 行默认不参与聚合。
+
+    boot 行的 ts 是开机毫秒（只有几千），混进时间范围查询会污染结果 ——
+    它会被塞进最左边那个桶里，把平均值拉得莫名其妙。
+    """
+    _seed_bucketed(db)
+    with db.session() as s:
+        _, without = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS
+        )
+        _, with_boot = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS, include_boot=True
+        )
+
+    assert without[0]["samples"] == 3
+    assert with_boot[0]["samples"] == 4, "include_boot=True 时 boot 行应被算进去"
+    # 88 混进来之后平均值被拉高 —— 这正是默认要排除它的原因
+    assert with_boot[0]["temperature"] > without[0]["temperature"]
+
+
+def test_bucketed_respects_device_filter(db: Database) -> None:
+    """device_id 过滤生效（否则别的设备的 99℃ 会混进同一个桶）。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        _, scoped = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS
+        )
+        _, merged = repo.query_telemetry_bucketed(s, bucket_ms=BUCKET_MS)
+
+    assert all(r["temperature"] < 90 for r in scoped)
+    assert merged[0]["samples"] > scoped[0]["samples"]
+
+
+def test_bucketed_without_device_filter_merges_devices(db: Database) -> None:
+    """★ 不传 device_id 时，多台设备在同一个时间桶里会被**平均到一起**。
+
+    这是刻意的：不传设备就是"看整体"，合并平均正是"整体"的含义。
+
+    但它和 ``query_telemetry`` 的行为**不同** —— 那个是各设备各返回
+    一行，不做合并。所以在这里显式锁住，免得以后有人以为是 bug 改掉。
+    """
+    _seed_bucketed(db)
+    with db.session() as s:
+        _, rows = repo.query_telemetry_bucketed(s, bucket_ms=BUCKET_MS)
+
+    # 两台设备各自在桶 0 有记录 → 合并成**一个**桶，样本数是两者之和
+    assert rows[0]["samples"] == 4  # DEVICE 3 条 + OTHER 1 条
+
+
+def test_bucketed_respects_time_range(db: Database) -> None:
+    """start / end 过滤生效。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        total, rows = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS, start_ms=BASE_TS + 10_000
+        )
+
+    assert total == 1
+    assert rows[0]["samples"] == 2
+
+
+def test_bucketed_empty_range_returns_zero(db: Database) -> None:
+    """空区间返回 ``(0, [])``，不是报错（和 query_telemetry 一致）。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        total, rows = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS, start_ms=2**62
+        )
+
+    assert total == 0
+    assert rows == []
+
+
+def test_bucketed_rssi_all_null_stays_null(db: Database) -> None:
+    """整桶 rssi 都是 NULL 时结果仍是 NULL，**不是 0**。
+
+    ★ 填 0 会被前端画成"信号极强"（0 dBm 是合法且极强的读数），
+      那是把"没有数据"伪装成"数据很好" —— 最坏的一类图表谎言。
+    """
+    _ensure_devices(db, DEVICE)
+    with db.session() as s:
+        s.add(
+            Telemetry(
+                device_id=DEVICE,
+                ts=BASE_TS,
+                received_at=BASE_TS,
+                temperature=30.0,
+                humidity=60.0,
+                rssi=None,
+                seq=1,
+                clock="unix",
+            )
+        )
+    with db.session() as s:
+        _, rows = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=BUCKET_MS
+        )
+
+    assert rows[0]["rssi"] is None
+
+
+def test_larger_bucket_yields_fewer_points(db: Database) -> None:
+    """桶宽越大、桶数越少 —— 这就是降采样的本质。"""
+    _seed_bucketed(db)
+    with db.session() as s:
+        _, narrow = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=2_000
+        )
+        _, wide = repo.query_telemetry_bucketed(
+            s, device_id=DEVICE, bucket_ms=60_000
+        )
+
+    assert len(wide) < len(narrow)
+    assert len(wide) == 1, "60 秒的桶能装下这 12 秒里的全部记录"
