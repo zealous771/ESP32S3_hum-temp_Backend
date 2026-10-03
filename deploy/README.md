@@ -8,7 +8,7 @@
 
 ```
 ESP32-S3                Windows                  WSL2 (Ubuntu-24.04)
-192.168.31.x  ──LAN──▶  192.168.31.128  ──portproxy──▶  eth0:1883
+192.168.1.9   ──LAN──▶  192.168.1.5     ──portproxy──▶  eth0:1883
                         （物理网卡）      （1883 转发）        │
                                                              ▼
                                               ┌──────── Docker ────────┐
@@ -41,8 +41,12 @@ ESP32-S3                Windows                  WSL2 (Ubuntu-24.04)
    但 ESP32 是从局域网进来的，它必须经过这个映射 + portproxy。
    两者互不替代。
 
-本机实测环境：Windows 局域网 `192.168.31.128/24`，网关 `192.168.31.1`；
-WSL 虚拟网卡 `172.22.112.1/20`。
+本机实测环境（**2026-10-03 换路由器后**）：Windows 局域网 `192.168.1.5/24`，
+设备 `192.168.1.9`；WSL 虚拟网卡 `172.22.112.1/20`。
+
+⚠️ **这些地址会随路由器变**，所以脚本里一律不写死网段（用 `LocalSubnet`）。
+但**设备侧的 `CONFIG_MQTT_BROKER_URI` 写死的是具体 IP**，换网络必须重新烧录 ——
+这是"换了路由器、WiFi 连上了、却一条数据都发不出去"的最常见原因。
 
 ## 当前配置状态（2026-09-29 实测）
 
@@ -55,9 +59,27 @@ WSL 虚拟网卡 `172.22.112.1/20`。
 | iot-backend 容器 | ✅ `Up (healthy)`，`/api/health` 里 `mqtt.host=mosquitto`、`db.journal_mode=wal` |
 | WSL 固定辅助 IP | ✅ `172.22.120.100/20`（`wsl-fixed-ip.service` 早已 enabled+active） |
 | **portproxy 转发 1883** | ✅ 已存在：`0.0.0.0:1883 → 172.22.120.100:1883` |
-| **防火墙放行 1883** | ✅ 规则 `MQTT Broker 1883`，`RemoteIP=192.168.31.0/24`，Enabled |
-| 局域网实测 | ✅ ESP32 能连上并持续上报（`MQTT connected`，`rssi=-28`） |
+| **防火墙放行 1883** | ⚠️ 规则 `MQTT Broker 1883` 存在，但 `RemoteIP` 还是**旧网段** `192.168.31.0/24` —— 换路由器后必须改成 `LocalSubnet`（见下方 2026-10-03 一节） |
+| 局域网实测 | ⚠️ 2026-10-03 换路由器后中断，原因见下 |
 | WSL 保活 | ⚠️ 脚本在启动文件夹里，但**需要登录后真正执行**才生效（见第 4 节） |
+
+### ★ 2026-10-03 换路由器：三处地址里有两处要改
+
+网段从 `192.168.31.0/24` 变成 `192.168.1.0/24`，这条链路上有三处提到地址：
+
+| 位置 | 是否要改 | 说明 |
+|---|---|---|
+| portproxy 监听地址 | ❌ 不用改 | 它是 `0.0.0.0:1883`，监听所有网卡 |
+| **Windows 防火墙 `RemoteIP`** | ✅ **要改** | 原为 `192.168.31.0/24`，改成 `LocalSubnet` |
+| **固件 `CONFIG_MQTT_BROKER_URI`** | ✅ **要改** | 原为 `mqtt://192.168.31.128:1883`，要改成新的 Windows IP |
+
+**症状与成因**：设备 WiFi 连得上（能 ping 通），但 broker 日志里完全没有它的连接记录 ——
+因为设备往一个**已经不存在的网段**发连接，包被网关丢弃（设备侧只看到 TCP 超时，
+看不到"被拒绝"，所以很容易误判成"服务器挂了"）。即使 broker 地址改对了，
+防火墙那条旧网段的规则还会把来自新网段的包**静默丢弃**（Windows 防火墙默认丢弃，
+不回 RST，所以设备端同样只看到超时）。
+
+⇒ 两处必须**同时**改完，只改一处仍然不通，而且现象一模一样。
 
 也就是说：**整条链路（设备 → 局域网 → portproxy → WSL → broker → 后端 → SQLite）已经全通**。
 
@@ -262,7 +284,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now wsl-fixed-ip.service
 
 ```powershell
 # 以管理员身份运行 PowerShell
-cd C:\Users\mgnwo\Desktop\wrok_place\ESP32_project\ESP32_learn\deploy
+cd C:\Users\mgnwo\Desktop\wrok_place\ESP32_project\ESP32_learn\backend\deploy
 .\setup-lan-access.ps1
 ```
 
@@ -270,13 +292,16 @@ cd C:\Users\mgnwo\Desktop\wrok_place\ESP32_project\ESP32_learn\deploy
 1. `netsh interface portproxy add v4tov4 listenaddress=0.0.0.0 listenport=1883
    connectaddress=172.22.120.100 connectport=1883`
 2. `netsh advfirewall firewall add rule name="MQTT Broker 1883" dir=in action=allow
-   protocol=TCP localport=1883 remoteip=192.168.31.0/24 profile=any`
+   protocol=TCP localport=1883 remoteip=LocalSubnet profile=any`
 
 规则写在注册表里，**重启后保留**。
 
-> **为什么 `remoteip` 要写网段而不是靠 `-Profile`**：开 VPN 时网络分类可能
-> 变化，靠源 IP 约束不受影响。调试阶段可以先改成 `any` 确认全链路能通，
-> 再收窄——分两步走能避免把"网段写错"和"网络隔离"两种问题混在一起排查。
+> **`remoteip` 用内置的 `LocalSubnet`，不写死网段**（2026-10-03 改）。
+> 写死网段的代价实测过一次：换路由器后网段一变，规则就只放行一个不存在的
+> 网段，来自真实网段的包被**静默丢弃**，症状和"broker 没起"完全一样。
+> `LocalSubnet` 自动跟随当前活动子网，换网络不用动脚本。
+> 代价是 WSL（172.22.x.x）和 VMware（192.168.x.x）的虚拟网段也算"本地子网"，
+> 1883 对它们也开放 —— 家用环境可接受。
 >
 > **网段必须按实际子网掩码算，不要凭 IP 猜**。实测遇到过 IP 是
 > `10.158.241.128` 但掩码是 `255.255.254.0`（/23）的情况，网段横跨两个
@@ -286,7 +311,7 @@ cd C:\Users\mgnwo\Desktop\wrok_place\ESP32_project\ESP32_learn\deploy
 ### 3.4 验证
 
 ```powershell
-Test-NetConnection 192.168.31.128 -Port 1883
+Test-NetConnection 192.168.1.5 -Port 1883
 # 预期 TcpTestSucceeded : True
 ```
 

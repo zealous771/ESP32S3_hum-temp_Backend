@@ -55,9 +55,9 @@ services:
       # "宿主机端口:容器端口"。
       #
       # 左侧的 1883 绑定在**容器所在网络命名空间**的所有网卡上，
-      # 也就是 WSL 的 eth0。ESP32 要连的是 Windows 物理网卡的地址
-      # （192.168.31.128），那需要 Windows 侧再做一个 portproxy 转发，
-      # 见 README.md 第 3 节。
+      # 也就是 WSL 的 eth0。ESP32 要连的是 Windows 物理网卡的地址，
+      # 那需要 Windows 侧再做一个 portproxy 转发，见 README.md 第 3 节。
+      # （Windows 的局域网 IP 会随路由器变，当前是 192.168.1.5。）
       #
       # ★ 这个端口映射在接了 iot-net 之后**仍然需要**：
       #   后端走容器网络直连，但 ESP32 是从局域网进来的，
