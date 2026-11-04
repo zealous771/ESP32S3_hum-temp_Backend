@@ -1,0 +1,35 @@
+# 放到 /etc/systemd/system/wsl-fixed-ip.service
+#
+# 作用：给 WSL 的 eth0 附加一个**固定的次要地址**，作为 Windows portproxy
+# 的稳定转发目标。WSL2 的 eth0 主地址由 DHCP 分配，每次重启都可能变，
+# 而 netsh portproxy 的规则里写死了一个 IP —— 指向 DHCP 地址的话，
+# WSL 重启一次转发就断了。
+#
+# 症状很隐蔽：Windows 本机访问正常（走 localhost 转发、不需要 portproxy），
+# 只有局域网里的 ESP32 连不上 1883。
+#
+# 安装：
+#   sudo cp wsl-fixed-ip.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now wsl-fixed-ip.service
+#   ip -4 addr show eth0 | grep inet     # 应看到两个地址
+#
+# 前提：/etc/wsl.conf 里必须有 [boot] systemd=true，否则 systemd 不启动。
+#
+# 注意 /20 掩码要跟当前 WSL NAT 网段一致（本工程是 172.22.112.0/20）。
+# 如果 Windows 更新 / .wslconfig 变更导致 WSL 网段变了，这个地址和
+# portproxy 的目标要一起改。完整说明见 ../README.md 第 3.1 节。
+
+[Unit]
+Description=Add fixed secondary IP to eth0 as stable target for Windows portproxy
+After=network.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# systemd 的 ExecStart 要求绝对路径
+ExecStart=/usr/sbin/ip addr replace 172.22.120.100/20 dev eth0
+ExecStop=-/usr/sbin/ip addr del 172.22.120.100/20 dev eth0
+
+[Install]
+WantedBy=multi-user.target
